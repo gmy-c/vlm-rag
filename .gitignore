@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# Generated outputs
+outputs/
+models/
+indexes/
+logs/
+
+# Generated demo data
+data/pages.json
+data/queries.json
+data/splits/
+data/sample_pages/
+
+# DocVQA (large dataset, stored separately)
+data/docvqa_extracted/
+data/docvqa_images/
+data/*.json
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
