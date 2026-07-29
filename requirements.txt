@@ -1,26 +1,37 @@
-# VLM-RAG full dependencies
-# Python 3.10+ / Linux / CUDA 12.x / RTX 4090 or higher
+# VLM-RAG dependencies — RTX 5090 (Blackwell) / CUDA 12.8+
+#
+# 重要：RTX 5090 需要 CUDA 12.8+，PyTorch 必须从 cu128 索引安装
+# 不要直接用 pip install torch，见下方 install 命令
 
-# Core
-torch>=2.1.0
-torchvision>=0.16.0
-transformers>=4.45.0
+# ── PyTorch (CUDA 12.8) ──
+# 安装命令（不要写在 requirements.txt 中，单独执行）:
+#   pip install --pre torch>=2.7.0 torchvision>=0.22.0 --index-url https://download.pytorch.org/whl/nightly/cu128
+# 或等 2.7 稳定版发布后:
+#   pip install torch>=2.7.0 torchvision>=0.22.0 --index-url https://download.pytorch.org/whl/cu128
+
+# ── HuggingFace 生态 ──
+transformers>=4.50.0
 accelerate>=0.30.0
+peft>=0.12.0
+huggingface_hub>=0.20.0
+
+# ── ColPali 检索 ──
+colpali-engine>=0.3.0,<0.4.0
+
+# ── 优化器（需要 >=0.45.3 才支持 Blackwell sm_120）──
+bitsandbytes>=0.45.3
+
+# ── Flash Attention（RTX 5090 上可选，预编译包可能不含 sm_120 内核）──
+# flash-attn 如果装不上，transformers 会自动降级到 SDPA，不影响训练
+# flash-attn>=2.7.0
+
+# ── 图像和 HTTP ──
 Pillow>=10.0.0
 requests>=2.28.0
+
+# ── 工具 ──
 numpy>=1.24.0
 PyYAML>=6.0
-
-# ColPali retrieval
-colpali-engine>=0.3.0,<0.4.0
-peft>=0.12.0
-bitsandbytes>=0.43.0
-flash-attn>=2.5.0
-
-# Tokenizer & model utils
 sentencepiece>=0.2.0
 einops>=0.7.0
 tqdm>=4.65.0
-
-# HuggingFace Hub (for model download)
-huggingface_hub>=0.20.0

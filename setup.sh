@@ -58,22 +58,77 @@ fi
 PY_VER=$("$PYTHON" --version 2>&1)
 echo "  ✓ $PY_VER ($PYTHON)"
 
-# ── 3. 安装依赖 ──
+# ── 3. CUDA 检查 ──
 echo ""
-echo "[3/4] 安装 Python 依赖..."
+echo "[3/5] 检查 CUDA 环境..."
+
+if command -v nvidia-smi &>/dev/null; then
+    DRIVER_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
+    CUDA_VER=$(nvidia-smi 2>/dev/null | grep "CUDA Version" | sed 's/.*CUDA Version: //' | cut -d' ' -f1)
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+    export GPU_NAME
+    echo "  GPU:           $GPU_NAME"
+    echo "  Driver:        $DRIVER_VER"
+    echo "  CUDA:          $CUDA_VER"
+
+    # RTX 5090 检查
+    if echo "$GPU_NAME" | grep -qi "5090"; then
+        echo ""
+        echo "  ⚠ 检测到 RTX 5090 (Blackwell 架构)！"
+        echo "  RTX 5090 需要 CUDA >= 12.8 + PyTorch 2.7+"
+        if [ "${CUDA_VER:-0}" \< "12.8" ] 2>/dev/null || [ "$CUDA_VER" = "12.8" ]; then
+            :
+        else
+            echo "  当前 CUDA $CUDA_VER 可能不兼容，需要 >= 12.8"
+        fi
+    fi
+else
+    echo "  ⚠ nvidia-smi 不可用，跳过 GPU 检测"
+fi
+
+# ── 4. 安装依赖 ──
+echo ""
+echo "[4/5] 安装 Python 依赖..."
 
 if [ "${1:-}" = "--no-install" ]; then
     echo "  跳过安装 (--no-install)"
 else
-    echo "  安装 requirements.txt ..."
+    echo "  升级 pip ..."
     "$PYTHON" -m pip install --upgrade pip -q
+
+    # RTX 5090: 从 cu128 索引安装 PyTorch 2.7+
+    if echo "${GPU_NAME:-}" | grep -qi "5090"; then
+        echo "  RTX 5090 检测到，使用 CUDA 12.8 PyTorch nightly ..."
+        "$PYTHON" -m pip install --pre torch torchvision \
+            --index-url https://download.pytorch.org/whl/nightly/cu128
+        echo ""
+        echo "  ▶ 说明: 使用了 PyTorch nightly build (CUDA 12.8)"
+        echo "    如果 PyTorch 2.7 稳定版已发布，可改用:"
+        echo "    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128"
+    else
+        echo "  安装 PyTorch (CUDA 12.x) ..."
+        "$PYTHON" -m pip install torch torchvision
+    fi
+
+    echo "  安装其余依赖 ..."
     "$PYTHON" -m pip install -r requirements.txt
+
+    # flash-attn: 尝试安装，失败则跳过（会自动降级到 SDPA）
+    echo ""
+    echo "  尝试安装 flash-attn (RTX 5090 需要从源码编译) ..."
+    if "$PYTHON" -m pip install flash-attn --no-build-isolation 2>/dev/null; then
+        echo "  ✓ flash-attn 安装成功"
+    else
+        echo "  ℹ flash-attn 安装失败，将使用 PyTorch SDPA 作为替代"
+        echo "    这对训练不影响，只是注意力计算会稍慢 (~5-10%)"
+    fi
+
     echo "  ✓ 依赖安装完成"
 fi
 
-# ── 4. 准备数据 ──
+# ── 5. 准备数据 ──
 echo ""
-echo "[4/4] 检查数据..."
+echo "[5/5] 检查数据..."
 
 # DocVQA 数据检查
 if [ -d "data/docvqa_extracted" ] && [ -d "data/docvqa_images" ]; then
