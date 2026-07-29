@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# ============================================================
+# VLM-RAG 服务器一键环境配置脚本
+# 使用方法: bash setup.sh
+# ============================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+echo "============================================================"
+echo "  VLM-RAG 环境配置"
+echo "  项目路径: $SCRIPT_DIR"
+echo "============================================================"
+
+# ── 1. 环境变量检查 ──
+echo ""
+echo "[1/4] 检查环境变量..."
+
+if [ ! -f .env ]; then
+    if [ -f .env.example ]; then
+        cp .env.example .env
+        echo "  已从 .env.example 创建 .env，请编辑填入 DOUBAO_API_KEY"
+        echo "  vim .env"
+    fi
+else
+    echo "  .env 已存在"
+fi
+
+# shellcheck disable=SC1090
+source .env 2>/dev/null || true
+
+if [ -z "${DOUBAO_API_KEY:-}" ] || [ "$DOUBAO_API_KEY" = "your-doubao-api-key-here" ]; then
+    echo "  ⚠ 警告: DOUBAO_API_KEY 未设置！评估脚本将无法调用 API。"
+    echo "  编辑 .env 文件并填入真实 Key，然后重新运行本脚本。"
+else
+    KEY_LEN=${#DOUBAO_API_KEY}
+    echo "  ✓ DOUBAO_API_KEY 已设置 (${KEY_LEN} 字符)"
+fi
+
+# ── 2. Python 环境 ──
+echo ""
+echo "[2/4] 检查 Python 环境..."
+
+PYTHON=""
+for candidate in python3 python python3.10 python3.11 python3.12 python3.13; do
+    if command -v "$candidate" &>/dev/null; then
+        PYTHON="$candidate"
+        break
+    fi
+done
+
+if [ -z "$PYTHON" ]; then
+    echo "  ✗ 错误: 未找到 Python！请安装 Python 3.10+"
+    exit 1
+fi
+
+PY_VER=$("$PYTHON" --version 2>&1)
+echo "  ✓ $PY_VER ($PYTHON)"
+
+# ── 3. 安装依赖 ──
+echo ""
+echo "[3/4] 安装 Python 依赖..."
+
+if [ "${1:-}" = "--no-install" ]; then
+    echo "  跳过安装 (--no-install)"
+else
+    echo "  安装 requirements.txt ..."
+    "$PYTHON" -m pip install --upgrade pip -q
+    "$PYTHON" -m pip install -r requirements.txt
+    echo "  ✓ 依赖安装完成"
+fi
+
+# ── 4. 准备数据 ──
+echo ""
+echo "[4/4] 检查数据..."
+
+# DocVQA 数据检查
+if [ -d "data/docvqa_extracted" ] && [ -d "data/docvqa_images" ]; then
+    IMG_COUNT=$(find data/docvqa_images -name "*.png" 2>/dev/null | wc -l)
+    echo "  ✓ DocVQA 数据已就绪 ($IMG_COUNT 张图片)"
+else
+    echo "  ⚠ DocVQA 数据未找到。请将数据放入:"
+    echo "    data/docvqa_extracted/  → Q&A JSON 文件"
+    echo "    data/docvqa_images/     → 页面 PNG 图片"
+    echo ""
+    echo "  下载方法:"
+    echo "    1. 访问 https://www.docvqa.org/datasets"
+    echo "    2. 下载 Task 1: Single Page Document Visual Question Answering"
+    echo "    3. 解压 Q&A JSON 到 data/docvqa_extracted/"
+    echo "    4. 解压图片到 data/docvqa_images/"
+fi
+
+# ColPali 权重检查
+if [ -d "models/colpali_retriever" ]; then
+    echo "  ✓ ColPali 训练权重已存在"
+else
+    echo "  ℹ ColPali 权重将在首次运行 train_colpali.py 时自动从 HuggingFace 下载"
+    echo "    (~11GB, 下载时间取决于网速)"
+    echo "    如需预下载: python -c \"from colpali_engine.models import ColPali; ColPali.from_pretrained('vidore/colpali-v1.3-merged')\""
+fi
+
+# ── 验证 ──
+echo ""
+echo "============================================================"
+echo "  配置完成！"
+echo "============================================================"
+echo ""
+echo "  验证安装:"
+echo "    $PYTHON scripts/test_integration.py"
+echo "    $PYTHON scripts/test_integration_generator.py"
+echo ""
+echo "  训练 ColPali 检索器:"
+echo "    $PYTHON scripts/train_colpali.py"
+echo ""
+echo "  评估生成模块 (需 API Key):"
+echo "    $PYTHON scripts/evaluate_generator.py --sample 10"
+echo ""
+echo "  构建合成数据集（快速测试）:"
+echo "    $PYTHON scripts/build_dataset.py"
+echo ""
+echo "============================================================"

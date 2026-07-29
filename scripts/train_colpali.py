@@ -123,6 +123,7 @@ def main() -> None:
         val_pages,
         val_queries,
         model_dir=PROJECT_ROOT / "models" / "colpali_retriever",
+        model_name=config.colpali_model,
         batch_size=batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=lr,

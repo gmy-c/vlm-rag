@@ -4,7 +4,7 @@ model_dir: models
 index_dir: indexes
 log_dir: logs
 top_k: 3
-embedding_dim: 384
+embedding_dim: 768
 temperature: 0.07
 epochs: 5
 hidden_layer_weights: 0.2,0.3,0.5

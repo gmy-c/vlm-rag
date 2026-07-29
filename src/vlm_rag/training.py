@@ -26,6 +26,7 @@ def train_colpali_retriever(
     val_queries: list[Query],
     model_dir: Path,
     *,
+    model_name: str = "vidore/colpali-v1.3-merged",
     batch_size: int = 8,
     gradient_accumulation_steps: int = 4,
     learning_rate: float = 5e-5,
@@ -71,7 +72,7 @@ def train_colpali_retriever(
 
     # ── 1. 初始化编码器 ──
     encoder_config = ColPaliDualEncoderConfig(
-        model_name="vidore/colpali-v1.2",
+        model_name=model_name,
         device=device,
     )
     encoder = ColPaliDualEncoder(encoder_config)

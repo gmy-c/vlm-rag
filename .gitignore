@@ -24,6 +24,7 @@ data/sample_pages/
 # DocVQA (large dataset, stored separately)
 data/docvqa_extracted/
 data/docvqa_images/
+data/desensitized/
 data/*.json
 
 # Environment

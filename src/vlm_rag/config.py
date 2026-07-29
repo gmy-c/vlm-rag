@@ -12,7 +12,7 @@ class ProjectConfig:
     index_dir: str = "indexes"
     log_dir: str = "logs"
     top_k: int = 3
-    embedding_dim: int = 384
+    embedding_dim: int = 768
     temperature: float = 0.07
     epochs: int = 5
     hidden_layer_weights: tuple[float, ...] = (0.2, 0.3, 0.5)
@@ -25,7 +25,7 @@ class ProjectConfig:
     warmup_ratio: float = 0.025
     max_grad_norm: float = 1.0
     # ── ColPali 模型参数 ──
-    colpali_model: str = "vidore/colpali-v1.2"
+    colpali_model: str = "vidore/colpali-v1.3-merged"
     lora_rank: int = 32
     lora_alpha: int = 32
     selected_layers_str: str = "0,8,16,23"

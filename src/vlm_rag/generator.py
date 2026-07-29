@@ -200,7 +200,7 @@ class DoubaoVisionGenerator:
         Returns the parsed JSON body of the assistant's response.
         Retries up to 2 extra times (3 total) with exponential back-off.
         """
-        url = f"{self.base_url}/api/v3/chat/completions"
+        url = f"{self.base_url}/chat/completions"
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",

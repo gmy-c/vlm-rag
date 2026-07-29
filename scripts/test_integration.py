@@ -59,7 +59,7 @@ def test_config_loads() -> None:
         resolve_project_path(PROJECT_ROOT, "configs/config.yaml")
     )
     assert config.batch_size == 8
-    assert config.colpali_model == "vidore/colpali-v1.2"
+    assert config.colpali_model == "vidore/colpali-v1.3-merged"
     assert config.get_selected_layers() == (0, 8, 16, 23)
     print(f"  OK Config: batch_size={config.batch_size}, "
          f"model={config.colpali_model}")
@@ -249,7 +249,7 @@ def test_train_entry_script() -> None:
 def main() -> None:
     data_root_str = os.environ.get(
         "DOCVQA_DATA_ROOT",
-        str(PROJECT_ROOT.parent / "__MACOSX" / "aiproject" / "data"),
+        str(PROJECT_ROOT / "data"),
     )
     data_root = Path(data_root_str)
 

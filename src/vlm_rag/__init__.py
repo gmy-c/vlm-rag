@@ -1,17 +1,14 @@
-"""Lightweight VLM-RAG demo package."""
+"""VLM-RAG: Vision-Language Retrieval-Augmented Generation package."""
 
 __all__ = [
-    "data",
     "baselines",
-    "cli",
     "config",
+    "data",
+    "dataset_split",
     "encoders",
     "generator",
-    "index_store",
     "logging_utils",
     "metrics",
-    "pipeline",
     "retriever",
     "training",
-    "workflows",
 ]

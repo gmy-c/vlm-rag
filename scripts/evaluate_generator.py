@@ -79,7 +79,7 @@ def main() -> None:
         data_root = Path(
             os.environ.get(
                 "DOCVQA_DATA_ROOT",
-                str(PROJECT_ROOT.parent / "__MACOSX" / "aiproject" / "data"),
+                str(PROJECT_ROOT / "data"),
             )
         )
 
