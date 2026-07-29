@@ -111,27 +111,64 @@ models/colpali_retriever/
 
 ---
 
-## 七、第六步：预测评估（需要 GPU + 豆包 API Key）
+## 七、第六步：评估检索器（不需要 API Key）
+
+训练完成后，先评估检索效果（不需要豆包 API，零成本）：
+
+```bash
+# 评估训练好的 retriever（加载 LoRA 权重）
+python scripts/evaluate_generator.py \
+    --retriever-checkpoint models/colpali_retriever \
+    --retrieval-only
+
+# 输出示例:
+#   MRR@10         0.7791
+#   Recall@3        0.8523
+#   Recall@5        0.9012
+#   Recall@10       0.9345
+```
+
+这里你就可以看到训练效果了——如果指标不满意，回去调参重训。
+
+---
+
+## 八、第七步：完整评估（需要 GPU + 豆包 API Key）
+
+检索达标后，接入豆包做端到端预测：
 
 ```bash
 # 设置 API Key
 export DOUBAO_API_KEY="你的豆包key"
 
 # 小样本测试（10 条，验证链路通）
-python scripts/evaluate_generator.py --sample 10
+python scripts/evaluate_generator.py \
+    --retriever-checkpoint models/colpali_retriever \
+    --sample 10
 
 # 确认无误后，全量评估
-python scripts/evaluate_generator.py
+python scripts/evaluate_generator.py \
+    --retriever-checkpoint models/colpali_retriever
 ```
 
-**输出的内容：**
+**输出：**
 ```
-outputs/generator_metrics.csv   ← per_page vs stitched 对比
+outputs/
+├── retrieval_metrics.csv   ← MRR@10, Recall@3/5/10
+├── generator_metrics.csv   ← per_page vs stitched 准确率
+└── combined_metrics.csv    ← 合并表
 ```
 
 ---
 
-## 八、常见问题速查
+## 九、评估指标体系
+
+| 指标 | 含义 | 测什么 |
+|------|------|--------|
+| `MRR@10` | 正确页面在前10中的平均倒数排名 | 检索排序质量 |
+| `Recall@3` | Top-3 召回正确页面的比例 | 检索覆盖率 |
+| `Recall@10` | Top-10 召回正确页面的比例 | 检索上限 |
+| `gen/per_page Accuracy` | 逐页推理+融合的答案准确率 | 生成质量（主方案） |
+| `gen/stitched Accuracy` | 图像拼接方案的答案准确率 | 基线对照 |
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
