@@ -33,7 +33,7 @@ class ColPaliDualEncoderConfig:
         max_query_length: Maximum number of tokens for query text.
     """
 
-    model_name: str = "vidore/colpali-v1.2"
+    model_name: str = "vidore/colpali-v1.3-merged"
     device: str = "cuda"
     proj_dim: int = 768
     selected_layers: tuple[int, ...] = (0, 8, 16, 23)

@@ -19,7 +19,7 @@ warmup_ratio: 0.025
 max_grad_norm: 1.0
 
 # ColPali 模型参数
-colpali_model: "vidore/colpali-v1.2"
+colpali_model: "vidore/colpali-v1.3-merged"
 lora_rank: 32
 lora_alpha: 32
 selected_layers_str: "0,8,16,23"
