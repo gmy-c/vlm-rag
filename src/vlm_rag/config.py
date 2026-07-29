@@ -25,7 +25,7 @@ class ProjectConfig:
     warmup_ratio: float = 0.025
     max_grad_norm: float = 1.0
     # ── ColPali 模型参数 ──
-    colpali_model: str = "vidore/colpali-v1.3-merged"
+    colpali_model: str = "checkpoint"
     lora_rank: int = 32
     lora_alpha: int = 32
     selected_layers_str: str = "0,8,16,23"

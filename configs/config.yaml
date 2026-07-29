@@ -19,7 +19,9 @@ warmup_ratio: 0.025
 max_grad_norm: 1.0
 
 # ColPali 模型参数
-colpali_model: "vidore/colpali-v1.3-merged"
+# 模型权重路径（相对于项目根目录，或 HuggingFace model ID）
+# 本地路径示例: "checkpoint" → 自动解析为 <project_root>/checkpoint
+colpali_model: "checkpoint"
 lora_rank: 32
 lora_alpha: 32
 selected_layers_str: "0,8,16,23"

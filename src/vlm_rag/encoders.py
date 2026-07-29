@@ -33,7 +33,7 @@ class ColPaliDualEncoderConfig:
         max_query_length: Maximum number of tokens for query text.
     """
 
-    model_name: str = "vidore/colpali-v1.3-merged"
+    model_name: str = "checkpoint"
     device: str = "cuda"
     proj_dim: int = 768
     selected_layers: tuple[int, ...] = (0, 8, 16, 23)
@@ -284,7 +284,7 @@ class ColPaliDualEncoder(nn.Module):
     def load(
         cls,
         save_dir: Path,
-        base_model: str = "vidore/colpali-v1.2",
+        base_model: str = "checkpoint",
     ) -> "ColPaliDualEncoder":
         """Load a saved checkpoint from disk.
 

@@ -26,7 +26,7 @@ def train_colpali_retriever(
     val_queries: list[Query],
     model_dir: Path,
     *,
-    model_name: str = "vidore/colpali-v1.3-merged",
+    model_name: str = "checkpoint",
     batch_size: int = 8,
     gradient_accumulation_steps: int = 4,
     learning_rate: float = 5e-5,

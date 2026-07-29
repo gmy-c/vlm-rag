@@ -95,7 +95,14 @@ def main() -> None:
     train_pages, train_queries = splits["train"]
     val_pages, val_queries = splits["val"]
 
-    # ── 训练 ──
+    # ── 解析模型路径（本地路径 → 绝对路径，HF ID → 保持原样）──
+    model_name = config.colpali_model
+    local_path = PROJECT_ROOT / model_name
+    if local_path.is_dir():
+        model_name = str(local_path.resolve())
+        print(f"Using local checkpoint: {model_name}")
+    else:
+        print(f"Using HuggingFace model: {model_name}")
     from vlm_rag.training import train_colpali_retriever
 
     print("\n" + "=" * 60)
@@ -123,7 +130,7 @@ def main() -> None:
         val_pages,
         val_queries,
         model_dir=PROJECT_ROOT / "models" / "colpali_retriever",
-        model_name=config.colpali_model,
+        model_name=model_name,
         batch_size=batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=lr,

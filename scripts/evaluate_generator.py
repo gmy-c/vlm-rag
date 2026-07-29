@@ -105,8 +105,16 @@ def main() -> None:
     from vlm_rag.encoders import ColPaliDualEncoder, ColPaliDualEncoderConfig
     from vlm_rag.retriever import DualTowerRetriever
 
+    # 解析模型路径（本地路径 → 绝对路径，HF ID → 保持原样）
+    model_name = config.colpali_model
+    local_path = PROJECT_ROOT / model_name
+    if local_path.is_dir():
+        model_name = str(local_path.resolve())
+
     print(f"Initialising retriever on {args.device} ...")
+    print(f"  Model: {model_name}")
     enc_cfg = ColPaliDualEncoderConfig(
+        model_name=model_name,
         device=args.device,
         use_lora=False,
     )

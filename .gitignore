@@ -9,9 +9,10 @@ build/
 # macOS
 .DS_Store
 
-# Generated outputs
+# Generated outputs & model weights
 outputs/
 models/
+checkpoint/
 indexes/
 logs/
 
