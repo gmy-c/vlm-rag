@@ -250,6 +250,11 @@ def main() -> None:
         queries=queries,
         api_key=api_key,
         top_k=args.top_k,
+        model=config.generator_doubao_model,
+        base_url=config.generator_doubao_base_url,
+        max_tokens=config.generator_max_tokens,
+        temperature=config.generator_temperature,
+        timeout=config.generator_timeout,
     )
 
     total_elapsed = time.perf_counter() - total_start

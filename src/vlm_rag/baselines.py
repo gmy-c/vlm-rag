@@ -217,6 +217,12 @@ def evaluate_generation_methods(
     queries: list[Query],
     api_key: str,
     top_k: int = 3,
+    *,
+    model: str = "doubao-seed-1-6-vision-250815",
+    base_url: str = "https://ark.cn-beijing.volces.com/api/v3",
+    max_tokens: int = 512,
+    temperature: float = 0.1,
+    timeout: int = 30,
 ) -> dict[str, dict[str, float]]:
     """Evaluate per-page vs stitched generation on the same retrieval results.
 
@@ -226,6 +232,11 @@ def evaluate_generation_methods(
         queries: All queries in the evaluation set.
         api_key: Doubao API key.
         top_k: Number of pages to retrieve per query.
+        model: Doubao model ID.
+        base_url: Doubao API base URL.
+        max_tokens: Maximum output tokens per API call.
+        temperature: Generation temperature.
+        timeout: HTTP request timeout in seconds.
 
     Returns:
         Dict mapping method name → {"accuracy": float, "em": float}.
@@ -233,7 +244,14 @@ def evaluate_generation_methods(
     results: dict[str, dict[str, float]] = {}
 
     # ── Build per-page generator ──
-    per_page_gen = DoubaoVisionGenerator(api_key=api_key)
+    per_page_gen = DoubaoVisionGenerator(
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout=timeout,
+    )
 
     # ── Build stitched generator (composition) ──
     stitched_gen = ImageStitchingGenerator(generator=per_page_gen)
