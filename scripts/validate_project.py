@@ -11,6 +11,8 @@ import sys
 import time
 from typing import Any, Callable
 
+from packaging.version import InvalidVersion, Version
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
@@ -32,9 +34,15 @@ EXPECTED_PACKAGES = {
     "requests": "2.34.2",
     "numpy": "2.4.4",
     "PyYAML": "6.0.3",
+    "packaging": "26.2",
     "sentencepiece": "0.2.2",
     "einops": "0.8.2",
     "tqdm": "4.70.0",
+}
+
+MINIMUM_PACKAGES = {
+    **EXPECTED_PACKAGES,
+    "packaging": "24.2",
 }
 
 EXPECTED_PAGE_COUNTS = {
@@ -73,6 +81,15 @@ def parse_args() -> argparse.Namespace:
         help="Run structural checks only; mark both real model forwards as skipped.",
     )
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--dependency-policy",
+        choices=("compatible", "exact"),
+        default="compatible",
+        help=(
+            "compatible accepts newer installed versions; exact reproduces "
+            "the locally verified lock versions."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -91,7 +108,11 @@ def main() -> int:
     output_path = args.output.expanduser().resolve()
     results: list[CheckResult] = []
 
-    _run_check(results, "critical_dependencies", _check_dependencies)
+    _run_check(
+        results,
+        "critical_dependencies",
+        lambda: _check_dependencies(args.dependency_policy),
+    )
     _run_check(results, "cuda_and_bf16", lambda: _check_cuda(args.device))
     _run_check(results, "dataset_directories", lambda: _check_data(data_root))
     _run_check(results, "sensitivity_manifest", lambda: _check_manifest(data_root))
@@ -211,7 +232,7 @@ def _run_check(
     print(safe_message)
 
 
-def _check_dependencies() -> dict[str, str]:
+def _check_dependencies(policy: str = "compatible") -> dict[str, str]:
     installed: dict[str, str] = {}
     mismatches: dict[str, dict[str, str]] = {}
     for package, expected in EXPECTED_PACKAGES.items():
@@ -220,11 +241,25 @@ def _check_dependencies() -> dict[str, str]:
         except PackageNotFoundError as exc:
             raise RuntimeError(f"Required package is missing: {package}") from exc
         installed[package] = actual
-        if not (actual == expected or actual.startswith(expected + "+")):
-            mismatches[package] = {"expected": expected, "actual": actual}
+        if policy == "exact":
+            accepted = actual == expected or actual.startswith(expected + "+")
+            requirement = expected
+        else:
+            minimum = MINIMUM_PACKAGES[package]
+            try:
+                accepted = Version(actual.split("+", 1)[0]) >= Version(minimum)
+            except InvalidVersion:
+                accepted = False
+            requirement = f">={minimum}"
+        if not accepted:
+            mismatches[package] = {
+                "policy": policy,
+                "expected": requirement,
+                "actual": actual,
+            }
     if mismatches:
         raise RuntimeError(f"Critical dependency version mismatch: {mismatches}")
-    return installed
+    return {"policy": policy, "installed": installed}
 
 
 def _check_cuda(device: str) -> dict[str, Any]:

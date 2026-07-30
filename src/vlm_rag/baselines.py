@@ -218,7 +218,7 @@ def evaluate_generation_methods(
     api_key: str,
     top_k: int = 3,
     *,
-    model: str = "doubao-seed-1-6-vision-250815",
+    model: str = "doubao-seed-2-1-pro",
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3",
     max_tokens: int = 512,
     temperature: float = 0.1,

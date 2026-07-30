@@ -1,0 +1,22 @@
+task: secure_visual_rag
+
+retrieval:
+  coarse_top_k: 128
+  rerank_top_k: 20
+  maxsim_backend: auto
+
+policy:
+  # The gate scans Top-20 reranked pages but sends at most 3 safe images.
+  answer_page_limit: 3
+  fail_closed: true
+
+doubao:
+  # May be overridden with DOUBAO_MODEL or an Ark Endpoint ID.
+  model: doubao-seed-2-1-pro
+  base_url: https://ark.cn-beijing.volces.com/api/v3
+  max_tokens: 512
+  temperature: 0.1
+  timeout_seconds: 60
+  max_attempts: 3
+  minimum_interval_seconds: 0.0
+  cache_dir: outputs/doubao_cache

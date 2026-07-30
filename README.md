@@ -101,6 +101,25 @@ MaxSim 优先使用 `late-interaction-kernels`（LIK）；未安装时可使用�
 
 持久化索引按 shard 保存页面 token，搜索时先用 CPU 中的全局向量粗排，再仅把候选 token 分批送入 GPU 重排。
 
+### 2.3 安全问答串联
+
+```text
+问题
+  ↓
+全局向量粗排 Top-128
+  ↓
+ColPali 1024-token 精确 MaxSim 重排 Top-20
+  ↓
+Sensitivity catalog 强制门控
+  ├─ 非敏感页：允许原图
+  ├─ 敏感页 + 已批准脱敏副本：只允许副本
+  └─ 缺预测 / 推理错误 / 敏感原图无副本：阻断
+  ↓
+最多 3 张安全页面 → Doubao-Seed-2.1-pro → 答案、证据页、审计记录
+```
+
+Sensitivity 是页面级风险分类器，不等于字段级涂黑工具。当前代码不会假装完成脱敏：敏感页只有在 `redaction_manifest.jsonl` 中存在已批准且哈希匹配的脱敏副本时才允许调用外部 API，否则 fail closed。`scripts/evaluate_generator.py` 保留为旧单向量/拼图基线；正式链路使用 `answer_query.py` 和 `evaluate_secure_rag.py`。
+
 ## 3. 环境
 
 已验证的本地环境位于 `E:\envs\vlm`。关键版本见 `requirements.txt`。Linux/RTX 5090 建议：
@@ -259,15 +278,30 @@ python scripts/train_sensitivity.py ... \
   --resume "$SENSITIVITY_FINETUNE_DIR/last.pt"
 ```
 
-评估与阈值校准：
+先只在验证集校准阈值：
 
 ```bash
 python scripts/evaluate_sensitivity.py \
+  --mode calibrate \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/sensitivity/val.jsonl" \
   --checkpoint "$SENSITIVITY_FINETUNE_DIR/best.pt" \
   --model "$COLPALI_MODEL_PATH" \
   --data-root "$DOCVQA_DATA_ROOT" \
   --target-recall 0.90 \
   --output-dir "$SENSITIVITY_EVAL_DIR"
+```
+
+再将验证集阈值固定到 test，禁止利用 test 标签重新选阈值：
+
+```bash
+python scripts/evaluate_sensitivity.py \
+  --mode evaluate \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/sensitivity/test.jsonl" \
+  --calibration "$SENSITIVITY_EVAL_DIR/calibration.json" \
+  --checkpoint "$SENSITIVITY_FINETUNE_DIR/best.pt" \
+  --model "$COLPALI_MODEL_PATH" \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --output-dir "$SENSITIVITY_EVAL_DIR/test"
 ```
 
 批量分类：
@@ -285,6 +319,19 @@ python scripts/classify_pages.py \
 ```
 
 损坏图片会写入 `errors.jsonl`；其他页面继续处理，但任务最终非零退出，避免静默漏页。
+
+为端到端门控生成覆盖全量页面且带 checkpoint/阈值/图片指纹的 catalog：
+
+```bash
+python scripts/build_sensitivity_catalog.py \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/sensitivity/all.jsonl" \
+  --predictions "$SENSITIVITY_PRED_DIR/predictions.jsonl" \
+  --errors "$SENSITIVITY_PRED_DIR/errors.jsonl" \
+  --checkpoint "$SENSITIVITY_FINETUNE_DIR/best.pt" \
+  --calibration "$SENSITIVITY_EVAL_DIR/calibration.json" \
+  --output "$SENSITIVITY_PRED_DIR/sensitivity_catalog.jsonl"
+```
 
 ## 8. Retrieval 正式训练
 
@@ -353,7 +400,68 @@ python scripts/evaluate_retrieval_multivector.py \
 
 可在完成一轮 late 训练后使用 `mine_hard_negatives.py` 基于精确 MaxSim 刷新更难的负例，再训练第二轮。
 
-## 9. 测试与验收
+## 9. 安全 RAG 与豆包
+
+默认模型为 `doubao-seed-2-1-pro`，API 根地址为 `https://ark.cn-beijing.volces.com/api/v3`。如果控制台为该模型分配了 `ep-...` Endpoint ID，用 `DOUBAO_MODEL` 覆盖即可。Key 只能放在进程环境变量中，不能写入 `.env.example`、YAML、命令历史、日志或 Git：
+
+```bash
+read -s -p "ARK_API_KEY: " ARK_API_KEY; echo
+export ARK_API_KEY
+# 可选：export DOUBAO_MODEL='ep-xxxxxxxx'
+```
+
+若有真实的脱敏副本，先准备映射文件（路径相对 data-root）：
+
+```json
+{"page_id":"example_page","redacted_path":"redacted/example_page.png"}
+```
+
+显式审核后生成带哈希的批准清单：
+
+```bash
+python scripts/build_redaction_manifest.py \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --catalog "$SENSITIVITY_PRED_DIR/sensitivity_catalog.jsonl" \
+  --mappings redaction_mappings.jsonl \
+  --output "$SENSITIVITY_PRED_DIR/redaction_manifest.jsonl" \
+  --approve
+```
+
+没有脱敏副本也可以运行，敏感候选会被阻断，系统继续尝试 Top-20 中更低排名的安全页；如果没有安全证据，返回 `blocked_sensitive_evidence`，不会调用豆包。
+
+```bash
+python scripts/answer_query.py \
+  --query "What was the total amount?" \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --adapter "$RETRIEVAL_LATE_DIR/best" \
+  --index-dir "$RETRIEVAL_INDEX_DIR" \
+  --sensitivity-catalog "$SENSITIVITY_PRED_DIR/sensitivity_catalog.jsonl" \
+  --output outputs/answers.jsonl \
+  --audit outputs/secure_rag_audit.jsonl \
+  --allow-real-api
+```
+
+加入 `--redaction-manifest "$SENSITIVITY_PRED_DIR/redaction_manifest.jsonl"` 才会使用已批准副本。外部传输需要显式 `--allow-real-api`，防止 smoke/测试意外上传页面。响应缓存键包含模型、提示词版本、问题哈希和图片哈希，不缓存 Key。
+
+正式小规模端到端评估：
+
+```bash
+python scripts/evaluate_secure_rag.py \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/retrieval/test.jsonl" \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --adapter "$RETRIEVAL_LATE_DIR/best" \
+  --index-dir "$RETRIEVAL_INDEX_DIR" \
+  --sensitivity-catalog "$SENSITIVITY_PRED_DIR/sensitivity_catalog.jsonl" \
+  --output-dir outputs/secure_rag_eval \
+  --max-queries 10 \
+  --allow-real-api
+```
+
+安全指标 `sensitive_original_exposure` 和 `missing_catalog_exposure` 必须始终为 0。
+
+## 10. 测试与验收
 
 ```bash
 python -m unittest discover -s tests -v
@@ -372,7 +480,7 @@ python scripts/validate_project.py \
   --model "$COLPALI_MODEL_PATH"
 ```
 
-## 10. 常见问题
+## 11. 常见问题
 
 | 现象 | 原因与处理 |
 | --- | --- |
@@ -384,7 +492,11 @@ python scripts/validate_project.py \
 | hard negatives 数量少 | 候选被相同文档过滤；提高 `candidate-top-k` |
 | 阶段 2 checkpoint mismatch | 阶段切换用 `--init-checkpoint`，同阶段续训才用 `--resume` |
 | 指标异常好 | 确认没有输入 OCR、没有文档交叉，并区分 smoke/tiny 与正式 test 指标 |
+| 豆包返回 401/403 | 立即停止重试；检查 `ARK_API_KEY`、模型服务开通状态及 Endpoint ID |
+| 模型名不可直接调用 | 将控制台显示的 `ep-...` 设置为 `DOUBAO_MODEL`，无需改代码 |
+| 安全页不足 3 张 | 正常；系统不会用敏感原图凑数，会少发页面或直接阻断 |
+| 索引 provenance mismatch | adapter 或基础模型与建索引时不同；必须用对应权重重建索引 |
 
-## 11. 当前验证边界
+## 12. 当前验证边界
 
-已在本地完成数据全量 manifest 构建、单元测试、Sensitivity 两种冻结状态的真实前向/反向、原生 ColPali rank-64 多向量前向和精确 MaxSim。尚未完成的项目是 RTX 5090 上的 batch 标定、全量训练、全量索引和正式 test 指标；这些结果不能在实际运行前预填。
+已在本地完成数据全量 manifest 构建、单元测试、Sensitivity 两种冻结状态的真实前向/反向、原生 ColPali rank-64 多向量前向、精确 MaxSim，以及使用 mock Ark HTTP 的安全门控/重试/缓存测试。未使用已暴露的 Key 发起真实 API 请求。尚未完成的项目是全量 Retrieval 训练、全量索引、正式 test 指标和真实豆包小规模评估；这些结果不能在实际运行前预填。

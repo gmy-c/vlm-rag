@@ -19,6 +19,10 @@ from vlm_rag.retrieval.model import (
     LateInteractionRetriever,
 )
 from vlm_rag.retrieval.schema import load_retrieval_manifest
+from vlm_rag.pipeline.provenance import (
+    fingerprint_adapter,
+    fingerprint_base_model_metadata,
+)
 
 
 @torch.no_grad()
@@ -44,13 +48,19 @@ def main() -> int:
     records = load_retrieval_manifest(args.manifest)
     if args.max_queries is not None:
         records = records[: args.max_queries]
-    model = LateInteractionRetriever(
-        LateInteractionModelConfig(checkpoint_path=args.model),
+    model, _ = LateInteractionRetriever.from_adapter(
+        args.adapter,
+        checkpoint_path_override=args.model,
         device=args.device,
     )
-    model.load_adapter(args.adapter)
     model.eval()
-    index = MultiVectorIndex(args.index_dir)
+    index = MultiVectorIndex(
+        args.index_dir,
+        expected_adapter_sha256=fingerprint_adapter(args.adapter),
+        expected_base_model_metadata_sha256=(
+            fingerprint_base_model_metadata(Path(args.model))
+        ),
+    )
     reciprocal_ranks = []
     recall_hits = {1: 0, 5: 0, 10: 0}
     misses = []

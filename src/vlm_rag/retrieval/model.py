@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, replace
 import json
 from pathlib import Path
 from typing import Any
@@ -109,6 +109,42 @@ class LateInteractionRetriever(nn.Module):
             head_device
         )
         self._keep_vision_frozen()
+
+    @classmethod
+    def from_adapter(
+        cls,
+        adapter_dir: Path,
+        *,
+        checkpoint_path_override: str | None = None,
+        device: str = "cuda",
+    ) -> tuple["LateInteractionRetriever", dict[str, Any]]:
+        """Restore the exact saved architecture before loading adapter weights."""
+        adapter_dir = adapter_dir.expanduser().resolve()
+        config_path = adapter_dir / "retrieval_config.json"
+        if not config_path.is_file():
+            raise FileNotFoundError(
+                f"Retrieval adapter config not found: {config_path}"
+            )
+        value = json.loads(config_path.read_text(encoding="utf-8"))
+        raw_config = value.get("model")
+        if not isinstance(raw_config, dict):
+            raise ValueError(f"Invalid model config in {config_path}")
+        valid_names = {field.name for field in fields(LateInteractionModelConfig)}
+        unknown = set(raw_config) - valid_names
+        if unknown:
+            raise ValueError(
+                f"Unknown retrieval model fields in {config_path}: "
+                f"{sorted(unknown)}"
+            )
+        config = LateInteractionModelConfig(**raw_config)
+        if checkpoint_path_override is not None:
+            config = replace(
+                config,
+                checkpoint_path=checkpoint_path_override,
+            )
+        model = cls(config, device=device)
+        extra = model.load_adapter(adapter_dir)
+        return model, extra
 
     def train(self, mode: bool = True) -> "LateInteractionRetriever":
         super().train(mode)
@@ -259,6 +295,25 @@ class LateInteractionRetriever(nn.Module):
         )
 
     def load_adapter(self, checkpoint_dir: Path) -> dict[str, Any]:
+        checkpoint_dir = checkpoint_dir.expanduser().resolve()
+        config_path = checkpoint_dir / "retrieval_config.json"
+        if config_path.is_file():
+            value = json.loads(config_path.read_text(encoding="utf-8"))
+            saved = value.get("model", {})
+            current = asdict(self.config)
+            mismatches = {
+                key: (saved.get(key), current.get(key))
+                for key in current
+                if key != "checkpoint_path"
+                and key in saved
+                and saved[key] != current[key]
+            }
+            if mismatches:
+                raise ValueError(
+                    "Retrieval adapter architecture mismatch. Load with "
+                    "LateInteractionRetriever.from_adapter(); "
+                    f"mismatches={mismatches}"
+                )
         self.load_language_adapter(checkpoint_dir / "language_lora")
         payload = torch.load(
             checkpoint_dir / "retrieval_heads.pt",

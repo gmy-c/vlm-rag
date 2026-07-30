@@ -31,6 +31,7 @@ requests==2.34.2
 # ── 工具 ──
 numpy==2.4.4
 PyYAML==6.0.3
+packaging>=24.2,<27
 sentencepiece==0.2.2
 einops==0.8.2
 tqdm==4.70.0

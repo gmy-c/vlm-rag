@@ -32,12 +32,17 @@ def main() -> int:
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
-    model = LateInteractionRetriever(
-        LateInteractionModelConfig(checkpoint_path=args.model),
-        device=args.device,
-    )
     if args.adapter is not None:
-        model.load_adapter(args.adapter)
+        model, _ = LateInteractionRetriever.from_adapter(
+            args.adapter,
+            checkpoint_path_override=args.model,
+            device=args.device,
+        )
+    else:
+        model = LateInteractionRetriever(
+            LateInteractionModelConfig(checkpoint_path=args.model),
+            device=args.device,
+        )
     metadata = build_multivector_index(
         model,
         load_retrieval_manifest(args.manifest),
@@ -45,6 +50,9 @@ def main() -> int:
         args.output_dir,
         batch_size=args.batch_size,
         pages_per_shard=args.pages_per_shard,
+        manifest_path=args.manifest,
+        adapter_dir=args.adapter,
+        base_model_path=Path(args.model),
     )
     print(
         f"Indexed {metadata['page_count']} pages in {args.output_dir.resolve()}"

@@ -42,6 +42,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument(
+        "--mode",
+        choices=("calibrate", "evaluate"),
+        default="calibrate",
+        help="Calibrate on validation data or evaluate a fixed validation threshold.",
+    )
+    parser.add_argument(
+        "--calibration",
+        type=Path,
+        default=None,
+        help="Required in evaluate mode; threshold is never fitted on test labels.",
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--target-recall", type=float, default=0.90)
@@ -57,8 +69,24 @@ def main() -> int:
     manifest = (
         args.manifest.expanduser().resolve()
         if args.manifest is not None
-        else data_root / "manifests" / "sensitivity" / "val.jsonl"
+        else data_root
+        / "manifests"
+        / "sensitivity"
+        / ("val.jsonl" if args.mode == "calibrate" else "test.jsonl")
     )
+    selected_threshold = 0.5
+    calibration_source: str | None = None
+    if args.mode == "evaluate":
+        if args.calibration is None:
+            raise ValueError("--calibration is required with --mode evaluate")
+        calibration_path = args.calibration.expanduser().resolve()
+        calibration_input = json.loads(
+            calibration_path.read_text(encoding="utf-8")
+        )
+        selected_threshold = float(calibration_input["selected_threshold"])
+        if not 0.0 <= selected_threshold <= 1.0:
+            raise ValueError("calibration selected_threshold must be in [0, 1]")
+        calibration_source = str(calibration_path)
     checkpoint = args.checkpoint.expanduser().resolve()
     base_model = _resolve_model(args.model)
     output_dir = (
@@ -86,7 +114,7 @@ def main() -> int:
         model,
         items,
         batch_size=args.batch_size,
-        threshold=0.5,
+        threshold=selected_threshold,
     ):
         if isinstance(event, PredictionResult):
             predictions.append(event)
@@ -118,38 +146,61 @@ def main() -> int:
         loss=evaluation_loss,
         threshold=0.5,
     )
-    calibration = calibrate_thresholds(
-        probabilities,
-        labels,
-        target_recall=args.target_recall,
-        default_threshold=0.5,
-        loss=evaluation_loss,
-    )
     smoke_only = bool(
         checkpoint_metadata.get("extra", {}).get("smoke_only", False)
     )
-    calibration_payload = {
-        "schema_version": 1,
-        "checkpoint": str(checkpoint),
-        "manifest": str(manifest),
-        "samples_requested": len(items),
-        "samples_evaluated": len(predictions),
-        "errors": len(errors),
-        "smoke_evaluation": smoke_only or args.max_samples is not None,
-        "warning": (
-            "Smoke/tiny-sample metrics validate the pipeline only and are not "
-            "a formal model-quality result."
-            if smoke_only or args.max_samples is not None
-            else None
-        ),
-        **calibration,
-    }
-    (output_dir / "calibration.json").write_text(
-        json.dumps(calibration_payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    smoke_evaluation = smoke_only or args.max_samples is not None
+    warning = (
+        "Smoke/tiny-sample metrics validate the pipeline only and are not "
+        "a formal model-quality result."
+        if smoke_evaluation
+        else None
     )
+    calibration = None
+    calibration_file = None
+    if args.mode == "calibrate":
+        calibration = calibrate_thresholds(
+            probabilities,
+            labels,
+            target_recall=args.target_recall,
+            default_threshold=0.5,
+            loss=evaluation_loss,
+        )
+        calibration_payload = {
+            "schema_version": 1,
+            "mode": "calibrate",
+            "checkpoint": str(checkpoint),
+            "manifest": str(manifest),
+            "samples_requested": len(items),
+            "samples_evaluated": len(predictions),
+            "errors": len(errors),
+            "smoke_evaluation": smoke_evaluation,
+            "warning": warning,
+            **calibration,
+        }
+        calibration_file = output_dir / "calibration.json"
+        calibration_file.write_text(
+            json.dumps(calibration_payload, ensure_ascii=False, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+        selected_threshold = float(calibration["selected_threshold"])
+        selected_metrics = binary_metrics_from_probabilities(
+            probabilities,
+            labels,
+            loss=evaluation_loss,
+            threshold=selected_threshold,
+        )
+    else:
+        selected_metrics = binary_metrics_from_probabilities(
+            probabilities,
+            labels,
+            loss=evaluation_loss,
+            threshold=selected_threshold,
+        )
     summary = {
         "schema_version": 1,
+        "mode": args.mode,
         "checkpoint": str(checkpoint),
         "base_model": str(base_model),
         "manifest": str(manifest),
@@ -158,24 +209,30 @@ def main() -> int:
         "samples_evaluated": len(predictions),
         "errors": len(errors),
         "metrics_at_0.5": default_metrics.to_dict(),
-        "calibration_file": str(output_dir / "calibration.json"),
+        "selected_threshold": selected_threshold,
+        "metrics_at_selected_threshold": selected_metrics.to_dict(),
+        "calibration_source": calibration_source,
+        "calibration_file": (
+            str(calibration_file) if calibration_file is not None else None
+        ),
         "baseline_gpu_allocated_gb": baseline_allocated,
         "peak_gpu_allocated_gb": _cuda_gb(torch.cuda.max_memory_allocated),
         "peak_gpu_reserved_gb": _cuda_gb(torch.cuda.max_memory_reserved),
-        "smoke_evaluation": calibration_payload["smoke_evaluation"],
-        "warning": calibration_payload["warning"],
+        "smoke_evaluation": smoke_evaluation,
+        "warning": warning,
     }
     (output_dir / "evaluation.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    print("Thresholds:")
-    print(
-        "  default=0.500000, "
-        f"best_f1={calibration['best_f1']['threshold']:.6f}, "
-        f"target_recall={calibration['target_recall']['threshold']:.6f}"
-    )
+    if calibration is not None:
+        print("Thresholds:")
+        print(
+            "  default=0.500000, "
+            f"best_f1={calibration['best_f1']['threshold']:.6f}, "
+            f"target_recall={calibration['target_recall']['threshold']:.6f}"
+        )
     if errors:
         print(
             f"Evaluation completed with {len(errors)} image errors; "

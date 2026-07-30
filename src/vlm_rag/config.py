@@ -34,7 +34,7 @@ class ProjectConfig:
     device: str = "cuda"
     # ── 生成器配置 ──
     generator_backend: str = "doubao"
-    generator_doubao_model: str = "doubao-seed-1-6-vision-250815"
+    generator_doubao_model: str = "doubao-seed-2-1-pro"
     generator_doubao_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     generator_max_tokens: int = 512
     generator_temperature: float = 0.1
@@ -55,11 +55,13 @@ class ProjectConfig:
             ValueError: 环境变量未设置时抛出，携带设置指引。
         """
         import os
-        key = os.environ.get("DOUBAO_API_KEY", "")
+        key = os.environ.get("ARK_API_KEY") or os.environ.get(
+            "DOUBAO_API_KEY", ""
+        )
         if not key:
             raise ValueError(
-                "DOUBAO_API_KEY environment variable not set. "
-                "Set it with: export DOUBAO_API_KEY='your-key'"
+                "ARK_API_KEY environment variable not set. "
+                "Set it in the shell; never commit it to the repository."
             )
         return key
 

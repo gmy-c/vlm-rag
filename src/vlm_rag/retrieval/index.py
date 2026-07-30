@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 from typing import Any, Iterable
@@ -12,6 +12,11 @@ from .dataset import resolve_retrieval_path
 from .maxsim import MaxSimBackend, maxsim_score_matrix
 from .model import LateInteractionRetriever
 from .schema import RetrievalRecord
+from ..pipeline.provenance import (
+    fingerprint_adapter,
+    fingerprint_base_model_metadata,
+    sha256_file,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +54,9 @@ def build_multivector_index(
     *,
     batch_size: int = 4,
     pages_per_shard: int = 128,
+    manifest_path: Path | None = None,
+    adapter_dir: Path | None = None,
+    base_model_path: Path | None = None,
 ) -> dict[str, Any]:
     if batch_size < 1 or pages_per_shard < 1:
         raise ValueError("batch_size and pages_per_shard must be positive")
@@ -111,11 +119,27 @@ def build_multivector_index(
     flush()
 
     metadata = {
-        "format_version": 1,
+        "format_version": 2,
         "task": "retrieval_multivector_index",
         "page_count": len(entries),
         "token_dim": int(model.colpali.dim),
         "image_only_tokens": model.config.image_only_tokens,
+        "model_config": {
+            key: value
+            for key, value in asdict(model.config).items()
+            if key != "checkpoint_path"
+        },
+        "manifest_sha256": (
+            sha256_file(manifest_path) if manifest_path is not None else None
+        ),
+        "adapter_sha256": (
+            fingerprint_adapter(adapter_dir) if adapter_dir is not None else None
+        ),
+        "base_model_metadata_sha256": (
+            fingerprint_base_model_metadata(base_model_path)
+            if base_model_path is not None
+            else None
+        ),
         "pages": [
             {
                 "page_id": item.page_id,
@@ -137,10 +161,25 @@ def build_multivector_index(
 class MultiVectorIndex:
     """CPU-backed index: global coarse search, exact token MaxSim reranking."""
 
-    def __init__(self, index_dir: Path) -> None:
+    def __init__(
+        self,
+        index_dir: Path,
+        *,
+        expected_adapter_sha256: str | None = None,
+        expected_base_model_metadata_sha256: str | None = None,
+    ) -> None:
         self.index_dir = index_dir.expanduser().resolve()
         metadata = json.loads(
             (self.index_dir / "index.json").read_text(encoding="utf-8")
+        )
+        self.metadata = metadata
+        self._validate_fingerprint(
+            "adapter_sha256",
+            expected_adapter_sha256,
+        )
+        self._validate_fingerprint(
+            "base_model_metadata_sha256",
+            expected_base_model_metadata_sha256,
         )
         self.pages = [IndexedPage(**item) for item in metadata["pages"]]
         self.by_page_id = {item.page_id: item for item in self.pages}
@@ -159,6 +198,10 @@ class MultiVectorIndex:
         self.global_vectors = torch.cat(global_parts, dim=0).float()
         if len(self.global_vectors) != len(self.pages):
             raise ValueError("Index metadata and vector count differ")
+        self._position_by_page_id = {
+            page.page_id: position
+            for position, page in enumerate(self.pages)
+        }
 
     def coarse_candidates(
         self,
@@ -231,6 +274,23 @@ class MultiVectorIndex:
         )
         return ranked[:top_k] if top_k is not None else ranked
 
+    def coarse_scores(
+        self,
+        query_global: torch.Tensor,
+        page_ids: list[str],
+    ) -> dict[str, float]:
+        if query_global.shape[0] != 1:
+            raise ValueError("coarse_scores accepts exactly one query")
+        positions = [self._position_by_page_id[page_id] for page_id in page_ids]
+        vectors = self.global_vectors[positions]
+        scores = (
+            query_global.detach().float().cpu() @ vectors.T
+        ).flatten().tolist()
+        return {
+            page_id: float(score)
+            for page_id, score in zip(page_ids, scores)
+        }
+
     def _load_shard(self, name: str) -> dict[str, torch.Tensor]:
         payload = self._shard_cache.get(name)
         if payload is None:
@@ -245,3 +305,21 @@ class MultiVectorIndex:
                 self._shard_cache.pop(next(iter(self._shard_cache)))
             self._shard_cache[name] = payload
         return payload
+
+    def _validate_fingerprint(
+        self,
+        field: str,
+        expected: str | None,
+    ) -> None:
+        if expected is None:
+            return
+        actual = self.metadata.get(field)
+        if actual is None:
+            raise ValueError(
+                f"Index has no {field}; rebuild it with the current scripts"
+            )
+        if actual != expected:
+            raise ValueError(
+                f"Index/model provenance mismatch for {field}: "
+                f"expected={expected}, index={actual}"
+            )

@@ -111,14 +111,15 @@ class DoubaoVisionGenerator:
 
         Args:
             api_key: Volcano Engine Ark API key (from DOUBAO_API_KEY env var).
-            model: Model ID.  Defaults to ``doubao-seed-1-6-vision-250815``.
+            model: Ark Model ID or Endpoint ID. Defaults to
+                ``doubao-seed-2-1-pro``.
             base_url: API base URL.  Defaults to the Volcano Engine Ark endpoint.
             max_tokens: Maximum output tokens per call.
             temperature: Sampling temperature (lower = more deterministic).
             timeout: HTTP request timeout in seconds.
         """
         self.api_key = api_key
-        self.model = model or "doubao-seed-1-6-vision-250815"
+        self.model = model or "doubao-seed-2-1-pro"
         self.base_url = base_url or "https://ark.cn-beijing.volces.com/api/v3"
         self.max_tokens = max_tokens
         self.temperature = temperature

@@ -10,6 +10,8 @@
 
 本项目目标是构建基于页面图像的 VLM-RAG 方案：直接将每一页文档渲染为页面图像，使用视觉语言模型对 Query 与页面图像进行统一向量编码，然后检索 Top-K 页面并交给多模态生成模块完成答案融合。
 
+> 工程实现更新：当前仓库不再是哈希编码演示链路。正式路径使用 ColPali 原生页面 token、全局粗排与精确 MaxSim 重排，并在外部生成前接入 Sensitivity catalog。非敏感原图或经过批准且哈希匹配的脱敏副本才可交给 Doubao-Seed-2.1-pro；缺预测、推理错误及无副本的敏感页均默认阻断。本文其余内容偏研究背景，复现实验请以根目录 README 和 SERVER_GUIDE 为准。
+
 核心业务指标包括：
 
 - 检索指标：MRR@10、Recall@K。
@@ -107,4 +109,4 @@ L = -log exp(sim(q, p+) / tau) / sum exp(sim(q, p_i) / tau)
 - 多页问答不宜简单拼接图片，逐页推理加分数融合更稳定。
 - 数据自动化构建是指标提升的关键，尤其对图表和表格类文档更明显。
 
-本仓库提供的代码是轻量可运行版，用于展示端到端流程。工程中包含数据构建、InfoNCE 训练目标、隐藏层权重搜索、VLM-RAG 主链路、OCR-RAG/SigLIP/ColPali 基线模拟和 CSV 指标报告。生产落地时，可以将本地哈希编码器替换为 MiniCPM-V、SigLIP、ColPali 等模型，将规则生成器替换为 MiniCPM-V 2.6 或 GPT-4o 多图问答接口，并接入 FAISS、Milvus 或 Elasticsearch 向量索引。
+本仓库当前包含数据构建、文档零交叉划分、Sensitivity 两阶段训练、对称 InfoNCE、hard negatives、rank-64 LoRA、ColPali late interaction、分片多向量索引、阈值校准、安全策略门控和 Doubao 视觉问答。OCR-RAG、SigLIP 和图像拼接路径仅作为研究基线，不是正式运行入口。

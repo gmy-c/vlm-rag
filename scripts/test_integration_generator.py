@@ -1,9 +1,8 @@
 """
-Integration test: verify generator module structure and logic.
+Integration test: verify the retained legacy generator baseline.
 
 Does NOT make real API calls — uses ``unittest.mock`` for simulation.
-If all tests pass, the pipeline is structurally sound and ready for
-GPU + API evaluation.
+The canonical secure pipeline is covered by tests/test_secure_pipeline.py.
 """
 from __future__ import annotations
 
@@ -37,15 +36,16 @@ if str(SRC_DIR) not in sys.path:
 
 def security_check() -> None:
     """Warn about missing / suspicious API key configuration."""
-    key = os.environ.get("DOUBAO_API_KEY", "")
+    key = os.environ.get("ARK_API_KEY") or os.environ.get(
+        "DOUBAO_API_KEY", ""
+    )
     if key and len(key) < 10:
         print(
-            "WARNING: DOUBAO_API_KEY seems too short "
+            "WARNING: Ark API key seems too short "
             f"({len(key)} chars). Verify it is correct."
         )
     if not key:
-        print("INFO: DOUBAO_API_KEY not set. Real API calls will fail.")
-        print("      Set with: export DOUBAO_API_KEY='your-key'")
+        print("INFO: ARK_API_KEY not set. No real API call will be made.")
     print()
 
 
@@ -303,8 +303,8 @@ def main() -> None:
 
     print("\n" + "=" * 60)
     print("ALL TESTS PASSED")
-    print("Pipeline is ready for GPU + API evaluation.")
-    print("Run: python scripts/evaluate_generator.py --sample 10")
+    print("Legacy generator baseline is structurally valid.")
+    print("Canonical command: python scripts/answer_query.py --help")
     print("=" * 60)
 
 

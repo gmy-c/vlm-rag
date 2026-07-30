@@ -39,10 +39,13 @@ export SENSITIVITY_HEAD_DIR=/data/outputs/sensitivity_head
 export SENSITIVITY_FINETUNE_DIR=/data/outputs/sensitivity_unfreeze4
 export SENSITIVITY_EVAL_DIR=/data/outputs/sensitivity_eval
 export SENSITIVITY_PRED_DIR=/data/outputs/sensitivity_predictions
+export SENSITIVITY_CATALOG=$SENSITIVITY_PRED_DIR/sensitivity_catalog.jsonl
 
 export RETRIEVAL_GLOBAL_DIR=/data/outputs/retrieval_global
 export RETRIEVAL_LATE_DIR=/data/outputs/retrieval_late
+export RETRIEVAL_TEST_INDEX_DIR=/data/outputs/retrieval_test_index
 export RETRIEVAL_INDEX_DIR=/data/outputs/retrieval_index
+export SECURE_RAG_DIR=/data/outputs/secure_rag
 
 export HF_HOME=$VLM_CACHE_ROOT/huggingface
 export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
@@ -57,7 +60,8 @@ mkdir -p \
   "$SENSITIVITY_HEAD_DIR" "$SENSITIVITY_FINETUNE_DIR" \
   "$SENSITIVITY_EVAL_DIR" "$SENSITIVITY_PRED_DIR" \
   "$RETRIEVAL_GLOBAL_DIR" "$RETRIEVAL_LATE_DIR" \
-  "$RETRIEVAL_INDEX_DIR"
+  "$RETRIEVAL_TEST_INDEX_DIR" "$RETRIEVAL_INDEX_DIR" \
+  "$SECURE_RAG_DIR"
 
 cd "$PROJECT_ROOT"
 ```
@@ -180,11 +184,22 @@ find "$PROFILE_ROOT" -name '*memory-profile.json' -maxdepth 1 -print
 
 ```bash
 "$VLM_PYTHON" scripts/evaluate_sensitivity.py \
+  --mode calibrate \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/sensitivity/val.jsonl" \
   --checkpoint "$SENSITIVITY_FINETUNE_DIR/best.pt" \
   --model "$COLPALI_MODEL_PATH" \
   --data-root "$DOCVQA_DATA_ROOT" \
   --target-recall 0.90 \
   --output-dir "$SENSITIVITY_EVAL_DIR"
+
+"$VLM_PYTHON" scripts/evaluate_sensitivity.py \
+  --mode evaluate \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/sensitivity/test.jsonl" \
+  --calibration "$SENSITIVITY_EVAL_DIR/calibration.json" \
+  --checkpoint "$SENSITIVITY_FINETUNE_DIR/best.pt" \
+  --model "$COLPALI_MODEL_PATH" \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --output-dir "$SENSITIVITY_EVAL_DIR/test"
 
 "$VLM_PYTHON" scripts/classify_pages.py \
   --manifest "$DOCVQA_DATA_ROOT/manifests/sensitivity/all.jsonl" \
@@ -195,9 +210,18 @@ find "$PROFILE_ROOT" -name '*memory-profile.json' -maxdepth 1 -print
   --batch-size 16 \
   --format both \
   --output-dir "$SENSITIVITY_PRED_DIR"
+
+"$VLM_PYTHON" scripts/build_sensitivity_catalog.py \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/sensitivity/all.jsonl" \
+  --predictions "$SENSITIVITY_PRED_DIR/predictions.jsonl" \
+  --errors "$SENSITIVITY_PRED_DIR/errors.jsonl" \
+  --checkpoint "$SENSITIVITY_FINETUNE_DIR/best.pt" \
+  --calibration "$SENSITIVITY_EVAL_DIR/calibration.json" \
+  --output "$SENSITIVITY_CATALOG"
 ```
 
-分类预测只是风险筛查结果。是否对页面做字段替换、是否允许进入外部 API，仍需独立的数据治理流程决定。
+分类预测只是风险筛查结果。catalog 是外发门控的唯一输入；损坏图、缺预测和敏感原图均默认阻断。
 
 ## 7. Retrieval 全局阶段
 
@@ -248,7 +272,31 @@ sed -i 's/maxsim_backend: auto/maxsim_backend: chunked/' \
 
 随后将 `--config` 指向 `/tmp/retrieval_late.yaml`。`chunked` 仍是精确 MaxSim。
 
-## 10. 建索引与 test
+## 10. 建 test 索引、评估和生产索引
+
+正式检索指标先只在 test 页面语料上计算：
+
+```bash
+"$VLM_PYTHON" scripts/build_multivector_index.py \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/retrieval/test.jsonl" \
+  --model "$COLPALI_MODEL_PATH" \
+  --adapter "$RETRIEVAL_LATE_DIR/best" \
+  --output-dir "$RETRIEVAL_TEST_INDEX_DIR" \
+  --batch-size 4 \
+  --pages-per-shard 128
+
+"$VLM_PYTHON" scripts/evaluate_retrieval_multivector.py \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/retrieval/test.jsonl" \
+  --index-dir "$RETRIEVAL_TEST_INDEX_DIR" \
+  --model "$COLPALI_MODEL_PATH" \
+  --adapter "$RETRIEVAL_LATE_DIR/best" \
+  --coarse-top-k 128 \
+  --maxsim-backend lik \
+  --output "$RETRIEVAL_LATE_DIR/test_metrics.json"
+```
+
+通过后再为实际问答建立全量生产索引：
 
 ```bash
 "$VLM_PYTHON" scripts/build_multivector_index.py \
@@ -259,18 +307,71 @@ sed -i 's/maxsim_backend: auto/maxsim_backend: chunked/' \
   --output-dir "$RETRIEVAL_INDEX_DIR" \
   --batch-size 4 \
   --pages-per-shard 128
-
-"$VLM_PYTHON" scripts/evaluate_retrieval_multivector.py \
-  --manifest "$DOCVQA_DATA_ROOT/manifests/retrieval/test.jsonl" \
-  --index-dir "$RETRIEVAL_INDEX_DIR" \
-  --model "$COLPALI_MODEL_PATH" \
-  --adapter "$RETRIEVAL_LATE_DIR/best" \
-  --coarse-top-k 128 \
-  --maxsim-backend lik \
-  --output "$RETRIEVAL_LATE_DIR/test_metrics.json"
 ```
 
-## 11. 中断恢复
+索引会保存 adapter、基础模型元数据和 manifest 指纹。问答时不匹配会直接报错，不能混用索引与权重。
+
+## 11. 安全问答与 Doubao-Seed-2.1-pro
+
+不要把 Key 写进项目文件。用户曾在会话中贴出的 Key 已视为泄露，应在控制台吊销并创建新的最小权限 Key：
+
+```bash
+read -s -p "ARK_API_KEY: " ARK_API_KEY; echo
+export ARK_API_KEY
+export DOUBAO_MODEL='doubao-seed-2-1-pro'
+# 如果控制台要求使用接入点：export DOUBAO_MODEL='ep-xxxxxxxx'
+```
+
+没有 `redaction_manifest.jsonl` 时，敏感页会被阻断，非敏感页仍可进入回答。真实调用必须显式确认：
+
+```bash
+"$VLM_PYTHON" scripts/answer_query.py \
+  --query "What was the total amount?" \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --adapter "$RETRIEVAL_LATE_DIR/best" \
+  --index-dir "$RETRIEVAL_INDEX_DIR" \
+  --sensitivity-catalog "$SENSITIVITY_CATALOG" \
+  --output "$SECURE_RAG_DIR/answers.jsonl" \
+  --audit "$SECURE_RAG_DIR/audit.jsonl" \
+  --allow-real-api
+```
+
+如果已人工或通过独立工具生成脱敏副本，把副本放到 data-root 内，准备 `page_id/redacted_path` JSONL，并执行：
+
+```bash
+"$VLM_PYTHON" scripts/build_redaction_manifest.py \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --catalog "$SENSITIVITY_CATALOG" \
+  --mappings redaction_mappings.jsonl \
+  --output "$SENSITIVITY_PRED_DIR/redaction_manifest.jsonl" \
+  --approve
+```
+
+随后在 `answer_query.py` 增加：
+
+```bash
+--redaction-manifest "$SENSITIVITY_PRED_DIR/redaction_manifest.jsonl"
+```
+
+先用 1–10 条查询做实际 API 验收，确认费用、延迟、模型服务开通状态和返回格式：
+
+```bash
+"$VLM_PYTHON" scripts/evaluate_secure_rag.py \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/retrieval/test.jsonl" \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --adapter "$RETRIEVAL_LATE_DIR/best" \
+  --index-dir "$RETRIEVAL_INDEX_DIR" \
+  --sensitivity-catalog "$SENSITIVITY_CATALOG" \
+  --output-dir "$SECURE_RAG_DIR/eval" \
+  --max-queries 10 \
+  --allow-real-api
+```
+
+`sensitive_original_exposure` 和 `missing_catalog_exposure` 必须为 0。
+
+## 12. 中断恢复
 
 Sensitivity 同阶段恢复：
 
@@ -291,7 +392,7 @@ Retrieval late 恢复：
 - Sensitivity 冻结阶段 → 解冻阶段使用 `--init-checkpoint`；
 - Retrieval global → late 使用 `--init-global`。
 
-## 12. 最终检查清单
+## 13. 最终检查清单
 
 - [ ] 数据根包含完整页面、OCR、QA 和 `desensitized`
 - [ ] sensitivity / retrieval manifest 统计正确
@@ -306,4 +407,9 @@ Retrieval late 恢复：
 - [ ] 索引分 shard 构建，GPU 不常驻完整语料
 - [ ] test 指标与 smoke/tiny 指标分开记录
 - [ ] 损坏图片和异常记录已审计
-- [ ] 外部生成 API 只接收已获授权/已治理页面
+- [ ] val 校准阈值固定后再计算 test 指标
+- [ ] 全量 sensitivity catalog 覆盖 12,767 页
+- [ ] adapter / base model / index 指纹一致
+- [ ] 外部生成 API 只接收非敏感原图或已批准脱敏副本
+- [ ] `sensitive_original_exposure == 0`
+- [ ] API Key 只由环境变量注入，未进入代码、配置和日志
