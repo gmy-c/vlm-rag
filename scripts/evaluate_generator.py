@@ -42,7 +42,7 @@ def _mask_key(key: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Evaluate multi-page visual generation methods"
+        description="[retrieval/rag] Evaluate ColPali retrieval and visual generation."
     )
     parser.add_argument(
         "--config", default="configs/config.yaml",
@@ -54,12 +54,30 @@ def main() -> None:
              "If not provided, uses base ColPali without fine-tuning.",
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help="Override local base checkpoint path or Hugging Face model ID",
+    )
+    parser.add_argument(
         "--top-k", type=int, default=3,
         help="Number of pages to retrieve per query (default: 3)",
     )
     parser.add_argument(
         "--sample", type=int, default=0,
         help="Only evaluate N queries (0 = all)",
+    )
+    parser.add_argument(
+        "--page-sample",
+        type=int,
+        default=0,
+        help="Limit candidate pages for a smoke evaluation while always "
+             "keeping selected queries' positive pages (0 = all pages)",
+    )
+    parser.add_argument(
+        "--index-batch-size",
+        type=int,
+        default=None,
+        help="Pages per GPU batch while building the evaluation index",
     )
     parser.add_argument(
         "--data-root", default=None,
@@ -125,15 +143,57 @@ def main() -> None:
         rng = random.Random(42)
         queries = rng.sample(queries, min(args.sample, len(queries)))
 
+    if args.page_sample > 0:
+        import random
+
+        positive_ids = {
+            page_id
+            for query in queries
+            for page_id in query.positive_page_ids
+        }
+        if args.page_sample < len(positive_ids):
+            parser.error(
+                "--page-sample must be at least the number of unique "
+                f"positive pages ({len(positive_ids)})"
+            )
+        page_lookup = {page.page_id: page for page in pages}
+        missing_ids = positive_ids - page_lookup.keys()
+        if missing_ids:
+            raise ValueError(f"Positive pages missing from corpus: {missing_ids}")
+        positive_pages = [page_lookup[page_id] for page_id in sorted(positive_ids)]
+        distractors = [
+            page for page in pages if page.page_id not in positive_ids
+        ]
+        rng = random.Random(43)
+        distractor_count = min(
+            args.page_sample - len(positive_pages),
+            len(distractors),
+        )
+        pages = positive_pages + rng.sample(distractors, distractor_count)
+        print(
+            "Smoke page subset: "
+            f"{len(positive_pages)} positives + {distractor_count} distractors"
+        )
+
     # ── 5. Init retriever ──
     from vlm_rag.encoders import ColPaliDualEncoder, ColPaliDualEncoderConfig
     from vlm_rag.retriever import DualTowerRetriever
 
     # Resolve base model path
-    model_name = config.colpali_model
-    local_path = PROJECT_ROOT / model_name
-    if local_path.is_dir():
-        model_name = str(local_path.resolve())
+    model_name = (
+        args.model
+        or os.environ.get("COLPALI_MODEL_PATH")
+        or config.colpali_model
+    )
+    model_path = Path(model_name)
+    for local_path in (
+        model_path,
+        PROJECT_ROOT / model_path,
+        PROJECT_ROOT.parent / model_path,
+    ):
+        if local_path.is_dir():
+            model_name = str(local_path.resolve())
+            break
 
     print(f"\nInitialising retriever on {args.device} ...")
     print(f"  Base model: {model_name}")
@@ -149,30 +209,14 @@ def main() -> None:
             print(f"ERROR: head_weights.pt not found in {ckpt_dir}")
             sys.exit(1)
 
-        # Load the saved config to get model_name etc.
-        import torch
-        ckpt = torch.load(
-            ckpt_dir / "head_weights.pt", map_location="cpu", weights_only=False
+        encoder = ColPaliDualEncoder.load(
+            ckpt_dir,
+            base_model=model_name,
+            device=args.device,
         )
-        saved_cfg: ColPaliDualEncoderConfig = ckpt["config"]
-        # Override device and base model path for current machine
-        saved_cfg.device = args.device
-        saved_cfg.model_name = model_name
-
-        encoder = ColPaliDualEncoder(saved_cfg)
-        encoder.vision_proj.load_state_dict(ckpt["vision_proj"])
-        encoder.text_proj.load_state_dict(ckpt["text_proj"])
-        encoder.layer_weights.data = ckpt["layer_weights"]
-
-        if saved_cfg.use_lora:
-            from peft import PeftModel
-            encoder.language_model = PeftModel.from_pretrained(
-                encoder.language_model,
-                ckpt_dir / "lora",
-            )
-        print(f"  ✓ Trained weights loaded from {ckpt_dir}")
+        print(f"  OK Trained weights loaded from {ckpt_dir}")
     else:
-        print("  ℹ No checkpoint provided — using base ColPali (no fine-tuning)")
+        print("  INFO No checkpoint provided - using base ColPali (no fine-tuning)")
         enc_cfg = ColPaliDualEncoderConfig(
             model_name=model_name,
             device=args.device,
@@ -181,7 +225,10 @@ def main() -> None:
         encoder = ColPaliDualEncoder(enc_cfg)
 
     retriever = DualTowerRetriever(encoder)
-    retriever.index(pages)
+    retriever.index(
+        pages,
+        batch_size=args.index_batch_size or config.index_batch_size,
+    )
 
     # ═══════════════════════════════════════════════════════════════
     # 6a. Retrieval metrics (always computed, no API needed)
@@ -210,7 +257,12 @@ def main() -> None:
         output_dir = (
             Path(args.output)
             if args.output
-            else resolve_project_path(PROJECT_ROOT, config.output_dir)
+            else Path(
+                os.environ.get(
+                    "RAG_OUTPUT_DIR",
+                    str(resolve_project_path(PROJECT_ROOT, config.output_dir)),
+                )
+            )
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         with (output_dir / "retrieval_metrics.csv").open(
@@ -266,10 +318,10 @@ def main() -> None:
     print("Combined Results")
     print("=" * 60)
     print(f"  {'Metric':20s} {'Value':>8s}")
-    print(f"  {'─' * 20} {'─' * 8}")
+    print(f"  {'-' * 20} {'-' * 8}")
     for name, val in retrieval_metrics.items():
         print(f"  {name:20s} {val:>8.4f}")
-    print(f"  {'─' * 20} {'─' * 8}")
+    print(f"  {'-' * 20} {'-' * 8}")
     for method, metrics in gen_results.items():
         print(f"  gen/{method:13s}  {metrics['accuracy']:>8.4f}")
     print(f"\n  Total elapsed: {total_elapsed:.1f}s")
@@ -282,7 +334,12 @@ def main() -> None:
     output_dir = (
         Path(args.output)
         if args.output
-        else resolve_project_path(PROJECT_ROOT, config.output_dir)
+        else Path(
+            os.environ.get(
+                "RAG_OUTPUT_DIR",
+                str(resolve_project_path(PROJECT_ROOT, config.output_dir)),
+            )
+        )
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 

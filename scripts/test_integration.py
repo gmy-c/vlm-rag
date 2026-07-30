@@ -58,7 +58,9 @@ def test_config_loads() -> None:
     config = load_config(
         resolve_project_path(PROJECT_ROOT, "configs/config.yaml")
     )
-    assert config.batch_size == 8
+    assert config.batch_size == 2
+    assert config.gradient_accumulation_steps == 16
+    assert config.index_batch_size == 2
     assert config.colpali_model == "checkpoint"
     assert config.get_selected_layers() == (0, 8, 16, 23)
     print(f"  OK Config: batch_size={config.batch_size}, "

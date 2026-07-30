@@ -1,200 +1,309 @@
-# 服务器部署与运行指南
+# RTX 5090 服务器部署与训练顺序
 
-> ⚠️ **RTX 5090 用户必读**：5090 是 Blackwell 架构 (sm_120)，需要 **CUDA 12.8+**。
-> 本文档已针对 RTX 5090 做了适配。关键依赖版本要求见第三节。
+本指南假定 32GB RTX 5090。所有 27–28GB batch 都必须在目标机器实测后确定，配置文件中的数值只是安全起点。
 
-## 一、你需要上传到服务器的文件
+## 1. 上传内容
 
-```
-服务器项目根目录 (例如 /root/autodl-tmp/aiproject)
-│
-├── 从 GitHub clone 的代码（不含 data/ 和 checkpoint/）
-├── checkpoint/          ← 你从百度网盘下载的 ColPali 权重 (~5.5GB)
-└── data/
-    ├── docvqa_extracted/    ← Q&A JSON 文件
-    │   ├── train_v1.0_withQT.json
-    │   ├── val_v1.0_withQT.json
-    │   └── test_v1.0.json
-    └── docvqa_images/       ← 页面 PNG 图片 (~12,767 张)
+需要上传：
+
+```text
+<project-root>/       # 代码、configs、scripts、src、tests
+<data-root>/          # 完整 data 四个顶层部分
+<model-root>/         # 本地 ColPali/PaliGemma checkpoint 的全部分片和配置
 ```
 
----
+无需上传：
 
-## 二、第一步：拉取代码
-
-```bash
-# SSH 登录服务器后
-cd /root/autodl-tmp   # 或你的工作目录
-
-# 从 GitHub clone
-git clone https://github.com/gmy-c/vlm-rag.git aiproject
-cd aiproject
-```
-
----
-
-## 三、第二步：放置数据和权重
-
-```bash
-# === 权重 ===
-# 用 bypy 下载到项目目录
-bypy down /checkpoint/ ./
-# 确认: ls checkpoint/ 应看到 model-00001-of-00002.safetensors 等文件
-
-# === DocVQA 数据 ===
-# 放到 data/ 下
-mkdir -p data/docvqa_extracted data/docvqa_images
-
-# 上传 Q&A JSON（用 scp 或 bypy）
-# scp train_v1.0_withQT.json server:/root/autodl-tmp/aiproject/data/docvqa_extracted/
-# scp val_v1.0_withQT.json   server:/root/autodl-tmp/aiproject/data/docvqa_extracted/
-# scp test_v1.0.json         server:/root/autodl-tmp/aiproject/data/docvqa_extracted/
-
-# 上传图片
-# scp *.png server:/root/autodl-tmp/aiproject/data/docvqa_images/
-```
-
----
-
-## 四、第三步：环境配置
-
-```bash
-# 确保在项目根目录
-cd /root/autodl-tmp/aiproject
-
-# 运行一键配置脚本
-bash setup.sh
-```
-
-这个脚本会自动：
-1. 从 `.env.example` 创建 `.env`
-2. 安装 `requirements.txt` 所有依赖
-3. 检查数据和权重是否就位
-
----
-
-## 五、第四步：验证环境（不上 GPU 也可以跑）
-
-```bash
-# AST 结构测试（不需要 GPU，不需要 API Key，秒级完成）
-python scripts/test_integration.py
-
-# 看到 "All tests passed! OK" 即表示代码没问题
-```
-
----
-
-## 六、第五步：训练检索器（需要 GPU）
-
-```bash
-# 确认 checkpoint 存在
-ls checkpoint/model-00001-of-00002.safetensors && echo "权重就绪"
-
-# 开始训练
-python scripts/train_colpali.py
-```
-
-**预期情况：**
-- 首次运行会加载本地 checkpoint 权重（不走网络）
-- ColPali 3B 模型加载到 GPU（约 11GB 显存）
-- 训练参数：LoRA r=32，只训约 20M 参数，视觉塔冻结
-- batch_size=8 + gradient_accumulation=4，有效 batch=32
-- 4090 24GB 可跑，5090 更从容
-
-**输出的内容：**
-```
-models/colpali_retriever/
-├── lora/              ← LoRA 权重
-│   ├── adapter_config.json
-│   └── adapter_model.safetensors
-├── head_weights.pt    ← 投影头 + 层权重
-├── retriever_config.json
-└── training_log.csv   ← 每 50 步的 loss/MRR/Recall
-```
-
----
-
-## 七、第六步：评估检索器（不需要 API Key）
-
-训练完成后，先评估检索效果（不需要豆包 API，零成本）：
-
-```bash
-# 评估训练好的 retriever（加载 LoRA 权重）
-python scripts/evaluate_generator.py \
-    --retriever-checkpoint models/colpali_retriever \
-    --retrieval-only
-
-# 输出示例:
-#   MRR@10         0.7791
-#   Recall@3        0.8523
-#   Recall@5        0.9012
-#   Recall@10       0.9345
-```
-
-这里你就可以看到训练效果了——如果指标不满意，回去调参重训。
-
----
-
-## 八、第七步：完整评估（需要 GPU + 豆包 API Key）
-
-检索达标后，接入豆包做端到端预测：
-
-```bash
-# 设置 API Key
-export DOUBAO_API_KEY="你的豆包key"
-
-# 小样本测试（10 条，验证链路通）
-python scripts/evaluate_generator.py \
-    --retriever-checkpoint models/colpali_retriever \
-    --sample 10
-
-# 确认无误后，全量评估
-python scripts/evaluate_generator.py \
-    --retriever-checkpoint models/colpali_retriever
-```
-
-**输出：**
-```
+```text
+.git/
 outputs/
-├── retrieval_metrics.csv   ← MRR@10, Recall@3/5/10
-├── generator_metrics.csv   ← per_page vs stitched 准确率
-└── combined_metrics.csv    ← 合并表
+__pycache__/
+.pytest_cache/
+本地 smoke checkpoint
+Hugging Face / pip / torch cache
 ```
 
----
+数据物理结构不需要修改。`desensitized` 必须随完整数据上传，但它只提供分类正标签。
 
-## 九、评估指标体系
-
-| 指标 | 含义 | 测什么 |
-|------|------|--------|
-| `MRR@10` | 正确页面在前10中的平均倒数排名 | 检索排序质量 |
-| `Recall@3` | Top-3 召回正确页面的比例 | 检索覆盖率 |
-| `Recall@10` | Top-10 召回正确页面的比例 | 检索上限 |
-| `gen/per_page Accuracy` | 逐页推理+融合的答案准确率 | 生成质量（主方案） |
-| `gen/stitched Accuracy` | 图像拼接方案的答案准确率 | 基线对照 |
-
-| 现象 | 原因 | 解决 |
-|------|------|------|
-| `colpali-engine` 装不上 | flash-attn 编译失败 | `pip install flash-attn --no-build-isolation` 后再装 colpali-engine |
-| `CUDA out of memory` | 显存不够 | 改 `config.yaml` 里 `batch_size: 2`、`gradient_accumulation_steps: 16` |
-| checkpoint 找不到 | 路径不对 | 确认 `checkpoint/` 在项目根目录，里面有 `.safetensors` 文件 |
-| DocVQA 数据报错 | 路径/格式不对 | 确认 `data/docvqa_images/` 下有 .png 文件，`data/docvqa_extracted/` 下有 .json |
-| HuggingFace 要下载模型 | checkpoint 没被识别 | 检查 `ls checkpoint/config.json` 是否存在 |
-| 豆包 API 报错 | Key 未设置 | `echo $DOUBAO_API_KEY` 确认有值 |
-| 豆包 API 返回空 | 网络不通或余额不足 | 先 `curl` 测试 API 连通性 |
-
----
-
-## 九、快捷命令汇总
+## 2. 统一变量
 
 ```bash
-# 从头到尾一键（训练完成后手动设置 API Key 再跑预测）
-git clone https://github.com/gmy-c/vlm-rag.git && cd aiproject
-bash setup.sh
-python scripts/test_integration.py
-python scripts/train_colpali.py
+export PROJECT_ROOT=/data/project/aiproject
+export DOCVQA_DATA_ROOT=/data/datasets/docvqa
+export COLPALI_MODEL_PATH=/data/models/colpali
+export VLM_ENV_ROOT=/data/envs/vlm
+export VLM_CACHE_ROOT=/data/cache/vlm
+export PROFILE_ROOT=/data/outputs/memory_profiles
 
-# 预测
-export DOUBAO_API_KEY="你的key"
-python scripts/evaluate_generator.py --sample 10
+export SENSITIVITY_HEAD_DIR=/data/outputs/sensitivity_head
+export SENSITIVITY_FINETUNE_DIR=/data/outputs/sensitivity_unfreeze4
+export SENSITIVITY_EVAL_DIR=/data/outputs/sensitivity_eval
+export SENSITIVITY_PRED_DIR=/data/outputs/sensitivity_predictions
+
+export RETRIEVAL_GLOBAL_DIR=/data/outputs/retrieval_global
+export RETRIEVAL_LATE_DIR=/data/outputs/retrieval_late
+export RETRIEVAL_INDEX_DIR=/data/outputs/retrieval_index
+
+export HF_HOME=$VLM_CACHE_ROOT/huggingface
+export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
+export TORCH_HOME=$VLM_CACHE_ROOT/torch
+export PIP_CACHE_DIR=$VLM_CACHE_ROOT/pip
+export TMPDIR=$VLM_CACHE_ROOT/tmp
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TOKENIZERS_PARALLELISM=false
+
+mkdir -p \
+  "$VLM_ENV_ROOT" "$VLM_CACHE_ROOT" "$PROFILE_ROOT" \
+  "$SENSITIVITY_HEAD_DIR" "$SENSITIVITY_FINETUNE_DIR" \
+  "$SENSITIVITY_EVAL_DIR" "$SENSITIVITY_PRED_DIR" \
+  "$RETRIEVAL_GLOBAL_DIR" "$RETRIEVAL_LATE_DIR" \
+  "$RETRIEVAL_INDEX_DIR"
+
+cd "$PROJECT_ROOT"
 ```
+
+## 3. 环境
+
+```bash
+python3 -m venv "$VLM_ENV_ROOT"
+export VLM_PYTHON="$VLM_ENV_ROOT/bin/python"
+
+"$VLM_PYTHON" -m pip install --upgrade pip
+"$VLM_PYTHON" -m pip install \
+  torch==2.7.1 torchvision==0.22.1 \
+  --index-url https://download.pytorch.org/whl/cu128
+"$VLM_PYTHON" -m pip install -r requirements.txt
+"$VLM_PYTHON" -m pip install "colpali-engine[lik]==0.3.17"
+```
+
+`setup.sh` 不下载 checkpoint。也可以使用：
+
+```bash
+export VLM_PYTHON
+export DOCVQA_DATA_ROOT
+export COLPALI_MODEL_PATH
+export VLM_CACHE_ROOT
+bash setup.sh
+```
+
+## 4. 数据与结构验收
+
+```bash
+"$VLM_PYTHON" scripts/build_sensitivity_manifest.py \
+  --data-root "$DOCVQA_DATA_ROOT"
+
+"$VLM_PYTHON" scripts/build_retrieval_manifest.py \
+  --data-root "$DOCVQA_DATA_ROOT"
+
+"$VLM_PYTHON" scripts/validate_project.py \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --skip-gpu-smoke
+
+"$VLM_PYTHON" -m unittest discover -s tests -v
+"$VLM_PYTHON" -m compileall -q src scripts tests
+git diff --check
+```
+
+预期：
+
+```text
+完整页面 12,767
+敏感正例  3,538
+负例      9,229
+文档      6,071
+查询     50,000
+train / val / test doc_id 交集均为 0
+```
+
+## 5. 先标定显存
+
+分别执行：
+
+```bash
+for task in sensitivity-head sensitivity-unfreeze4 global late
+do
+  "$VLM_PYTHON" scripts/profile_training_memory.py \
+    --task "$task" \
+    --data-root "$DOCVQA_DATA_ROOT" \
+    --model "$COLPALI_MODEL_PATH" \
+    --work-dir "$PROFILE_ROOT" \
+    --max-reserved-gb 28
+done
+```
+
+查看：
+
+```bash
+find "$PROFILE_ROOT" -name '*memory-profile.json' -maxdepth 1 -print
+```
+
+选择原则：
+
+- `peak_reserved_gb <= 28`；
+- 目标区间 26–28GB；
+- 选中的 batch 再连续跑至少 200 step 观察是否稳定；
+- OOM 时降低 physical batch，用梯度累积保持 effective batch；
+- 不把 32GB 全部作为 PyTorch 上限，需给 CUDA context、kernel workspace 和波动留余量。
+
+把 profile 推荐值通过 CLI 覆盖配置，例如：
+
+```bash
+--batch-size 32
+--micro-batch-size 4
+```
+
+## 6. Sensitivity 两阶段
+
+阶段 1：
+
+```bash
+"$VLM_PYTHON" scripts/train_sensitivity.py \
+  --config configs/sensitivity_head_5090.yaml \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --output-dir "$SENSITIVITY_HEAD_DIR"
+```
+
+阶段 2：
+
+```bash
+"$VLM_PYTHON" scripts/train_sensitivity.py \
+  --config configs/sensitivity_unfreeze4_5090.yaml \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --init-checkpoint "$SENSITIVITY_HEAD_DIR/best.pt" \
+  --output-dir "$SENSITIVITY_FINETUNE_DIR"
+```
+
+评估和推理：
+
+```bash
+"$VLM_PYTHON" scripts/evaluate_sensitivity.py \
+  --checkpoint "$SENSITIVITY_FINETUNE_DIR/best.pt" \
+  --model "$COLPALI_MODEL_PATH" \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --target-recall 0.90 \
+  --output-dir "$SENSITIVITY_EVAL_DIR"
+
+"$VLM_PYTHON" scripts/classify_pages.py \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/sensitivity/all.jsonl" \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --checkpoint "$SENSITIVITY_FINETUNE_DIR/best.pt" \
+  --model "$COLPALI_MODEL_PATH" \
+  --calibration "$SENSITIVITY_EVAL_DIR/calibration.json" \
+  --batch-size 16 \
+  --format both \
+  --output-dir "$SENSITIVITY_PRED_DIR"
+```
+
+分类预测只是风险筛查结果。是否对页面做字段替换、是否允许进入外部 API，仍需独立的数据治理流程决定。
+
+## 7. Retrieval 全局阶段
+
+```bash
+"$VLM_PYTHON" scripts/train_retrieval_global.py \
+  --config configs/retrieval_global_5090.yaml \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --output-dir "$RETRIEVAL_GLOBAL_DIR"
+```
+
+不要把 `--data-root` 改为 `desensitized`。
+
+## 8. Hard negatives
+
+```bash
+"$VLM_PYTHON" scripts/mine_global_hard_negatives.py \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/retrieval/train.jsonl" \
+  --checkpoint "$RETRIEVAL_GLOBAL_DIR" \
+  --base-model "$COLPALI_MODEL_PATH" \
+  --output "$DOCVQA_DATA_ROOT/manifests/retrieval/hard_negatives.jsonl" \
+  --page-batch-size 64 \
+  --query-batch-size 128 \
+  --candidate-top-k 64 \
+  --negatives-per-query 4
+```
+
+## 9. Retrieval 多向量阶段
+
+```bash
+"$VLM_PYTHON" scripts/train_retrieval_late.py \
+  --config configs/retrieval_late_5090.yaml \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --hard-negatives "$DOCVQA_DATA_ROOT/manifests/retrieval/hard_negatives.jsonl" \
+  --init-global "$RETRIEVAL_GLOBAL_DIR/lora" \
+  --output-dir "$RETRIEVAL_LATE_DIR"
+```
+
+如果 LIK 不可用：
+
+```bash
+cp configs/retrieval_late_5090.yaml /tmp/retrieval_late.yaml
+sed -i 's/maxsim_backend: auto/maxsim_backend: chunked/' \
+  /tmp/retrieval_late.yaml
+```
+
+随后将 `--config` 指向 `/tmp/retrieval_late.yaml`。`chunked` 仍是精确 MaxSim。
+
+## 10. 建索引与 test
+
+```bash
+"$VLM_PYTHON" scripts/build_multivector_index.py \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/retrieval/all.jsonl" \
+  --model "$COLPALI_MODEL_PATH" \
+  --adapter "$RETRIEVAL_LATE_DIR/best" \
+  --output-dir "$RETRIEVAL_INDEX_DIR" \
+  --batch-size 4 \
+  --pages-per-shard 128
+
+"$VLM_PYTHON" scripts/evaluate_retrieval_multivector.py \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/retrieval/test.jsonl" \
+  --index-dir "$RETRIEVAL_INDEX_DIR" \
+  --model "$COLPALI_MODEL_PATH" \
+  --adapter "$RETRIEVAL_LATE_DIR/best" \
+  --coarse-top-k 128 \
+  --maxsim-backend lik \
+  --output "$RETRIEVAL_LATE_DIR/test_metrics.json"
+```
+
+## 11. 中断恢复
+
+Sensitivity 同阶段恢复：
+
+```bash
+"$VLM_PYTHON" scripts/train_sensitivity.py ... \
+  --resume "$SENSITIVITY_FINETUNE_DIR/last.pt"
+```
+
+Retrieval late 恢复：
+
+```bash
+"$VLM_PYTHON" scripts/train_retrieval_late.py ... \
+  --resume "$RETRIEVAL_LATE_DIR/last"
+```
+
+阶段切换不能使用 `--resume`：
+
+- Sensitivity 冻结阶段 → 解冻阶段使用 `--init-checkpoint`；
+- Retrieval global → late 使用 `--init-global`。
+
+## 12. 最终检查清单
+
+- [ ] 数据根包含完整页面、OCR、QA 和 `desensitized`
+- [ ] sensitivity / retrieval manifest 统计正确
+- [ ] 三个 split 文档零交叉
+- [ ] 依赖、CUDA、BF16 和 checkpoint 分片完整
+- [ ] 四类任务都完成 5090 显存 profile
+- [ ] 正式 batch 的 reserved 峰值不超过 28GB
+- [ ] Sensitivity 阶段 2 从阶段 1 初始化
+- [ ] 分类 checkpoint 选择策略满足目标 Recall
+- [ ] Global hard negatives 排除了同文档页面
+- [ ] Late 模型继承 global LoRA 且没有嵌套适配器
+- [ ] 索引分 shard 构建，GPU 不常驻完整语料
+- [ ] test 指标与 smoke/tiny 指标分开记录
+- [ ] 损坏图片和异常记录已审计
+- [ ] 外部生成 API 只接收已获授权/已治理页面

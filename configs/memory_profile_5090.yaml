@@ -1,0 +1,13 @@
+task: memory_profile
+device: cuda
+target_reserved_gb: 26.0
+max_reserved_gb: 28.0
+max_device_used_gb: 29.0
+
+global_batch_candidates: [64, 96, 128, 160]
+late_batch_candidates: [2, 4, 6, 8]
+sensitivity_head_candidates: [16, 24, 32, 40]
+sensitivity_unfreeze4_candidates: [8, 12, 16, 24]
+warmup_steps: 5
+profile_steps: 20
+soak_steps: 200

@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 
@@ -24,26 +25,44 @@ if str(SRC_DIR) not in sys.path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Train ColPali dual-tower retriever on DocVQA"
+        description="[retrieval/rag] Train the ColPali dual-tower retriever on full DocVQA."
     )
     parser.add_argument("--config", default="configs/config.yaml")
     parser.add_argument("--device", default=None)
     parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--batch-size", "--batch_size", dest="batch_size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Override local checkpoint path or Hugging Face model ID",
+    )
+    parser.add_argument(
+        "--index-batch-size",
+        type=int,
+        default=None,
+        help="Pages per GPU batch during validation indexing",
+    )
     parser.add_argument(
         "--data-root",
         default=None,
-        help="DocVQA data root directory (default: project data/ dir)",
+        help="Full DocVQA root; never data/desensitized. "
+             "Defaults to DOCVQA_DATA_ROOT or a discovered data/ directory.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Retrieval checkpoint directory. Defaults to RETRIEVAL_OUTPUT_DIR "
+             "or models/colpali_retriever.",
     )
     parser.add_argument(
         "--train-qa",
-        default="data/docvqa_extracted/train_v1.0_withQT.json",
+        default="docvqa_extracted/train_v1.0_withQT.json",
         help="Path to train Q&A JSON",
     )
     parser.add_argument(
         "--images-dir",
-        default="data/docvqa_images",
+        default="docvqa_images",
         help="Path to page images directory",
     )
     args = parser.parse_args()
@@ -56,14 +75,11 @@ def main() -> None:
     device = args.device or config.device
     epochs = args.epochs or config.epochs
     batch_size = args.batch_size or config.batch_size
+    index_batch_size = args.index_batch_size or config.index_batch_size
     lr = args.lr or config.learning_rate
 
     # ── 解析数据路径 ──
-    data_root = (
-        Path(args.data_root)
-        if args.data_root
-        else PROJECT_ROOT / "data"
-    )
+    data_root = _resolve_data_root(args.data_root)
     train_qa_path = data_root / args.train_qa if not Path(args.train_qa).is_absolute() else Path(args.train_qa)
     images_dir = data_root / args.images_dir if not Path(args.images_dir).is_absolute() else Path(args.images_dir)
 
@@ -96,16 +112,35 @@ def main() -> None:
     val_pages, val_queries = splits["val"]
 
     # ── 解析模型路径（本地路径 → 绝对路径，HF ID → 保持原样）──
-    model_name = config.colpali_model
-    local_path = PROJECT_ROOT / model_name
-    if local_path.is_dir():
-        model_name = str(local_path.resolve())
-        print(f"Using local checkpoint: {model_name}")
+    model_name = (
+        args.model
+        or os.environ.get("COLPALI_MODEL_PATH")
+        or config.colpali_model
+    )
+    model_path = Path(model_name)
+    local_candidates = (
+        model_path,
+        PROJECT_ROOT / model_path,
+        PROJECT_ROOT.parent / model_path,
+    )
+    for local_path in local_candidates:
+        if local_path.is_dir():
+            model_name = str(local_path.resolve())
+            print(f"Using local checkpoint: {model_name}")
+            break
     else:
         print(f"Using HuggingFace model: {model_name}")
     from vlm_rag.training import train_colpali_retriever
+    model_dir = Path(
+        args.output_dir
+        or os.environ.get(
+            "RETRIEVAL_OUTPUT_DIR",
+            str(PROJECT_ROOT / "models" / "colpali_retriever"),
+        )
+    ).expanduser().resolve()
 
     print("\n" + "=" * 60)
+    print("Task:             retrieval/rag")
     print("Training Configuration:")
     print(f"  Device:           {device}")
     print(f"  Train pages:      {len(train_pages)}")
@@ -115,13 +150,14 @@ def main() -> None:
     print(f"  Epochs:           {epochs}")
     print(f"  Batch size:       {batch_size}")
     print(f"  Grad accum steps: {config.gradient_accumulation_steps}")
+    print(f"  Index batch size: {index_batch_size}")
     print(
         f"  Effective batch:  "
         f"{batch_size * config.gradient_accumulation_steps}"
     )
     print(f"  Learning rate:    {lr}")
     print(f"  Temperature:      {config.temperature}")
-    print(f"  Model dir:        {PROJECT_ROOT / 'models' / 'colpali_retriever'}")
+    print(f"  Model dir:        {model_dir}")
     print("=" * 60 + "\n")
 
     best = train_colpali_retriever(
@@ -129,8 +165,13 @@ def main() -> None:
         train_queries,
         val_pages,
         val_queries,
-        model_dir=PROJECT_ROOT / "models" / "colpali_retriever",
+        model_dir=model_dir,
         model_name=model_name,
+        proj_dim=config.embedding_dim,
+        selected_layers=config.get_selected_layers(),
+        lora_rank=config.lora_rank,
+        lora_alpha=config.lora_alpha,
+        max_query_length=config.max_query_length,
         batch_size=batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=lr,
@@ -139,6 +180,7 @@ def main() -> None:
         warmup_ratio=config.warmup_ratio,
         max_grad_norm=config.max_grad_norm,
         device=device,
+        index_batch_size=index_batch_size,
     )
 
     print("\n" + "=" * 60)
@@ -146,8 +188,27 @@ def main() -> None:
     print(f"  Best epoch:   {best['epoch']}")
     print(f"  Best MRR@10:  {best['mrr@10']}")
     print(f"  Best Recall@3:{best['recall@3']}")
-    print(f"  Model saved:  models/colpali_retriever/")
+    print(f"  Model saved:  {model_dir}")
     print("=" * 60)
+
+
+def _resolve_data_root(value: str | None) -> Path:
+    candidates = []
+    if value:
+        candidates.append(Path(value))
+    elif os.environ.get("DOCVQA_DATA_ROOT"):
+        candidates.append(Path(os.environ["DOCVQA_DATA_ROOT"]))
+    candidates.extend((PROJECT_ROOT / "data", PROJECT_ROOT.parent / "data"))
+    for candidate in candidates:
+        if (
+            (candidate / "docvqa_extracted").is_dir()
+            and (candidate / "docvqa_images").is_dir()
+        ):
+            return candidate.expanduser().resolve()
+    raise FileNotFoundError(
+        "Full DocVQA root not found. Pass --data-root or set DOCVQA_DATA_ROOT. "
+        "The root must contain docvqa_extracted/ and docvqa_images/."
+    )
 
 
 if __name__ == "__main__":

@@ -40,19 +40,39 @@ class DualTowerRetriever:
     # 离线索引
     # ═══════════════════════════════════════════════════════════
 
-    def index(self, pages: list[Page]) -> None:
-        """Batch-encode all pages and store as a single tensor.
+    def index(
+        self,
+        pages: list[Page],
+        *,
+        batch_size: int = 2,
+        storage_device: str = "cpu",
+    ) -> None:
+        """Encode pages in bounded batches and store one vector tensor.
 
-        Replaces the old per-page dict with one matrix multiplication at
-        search time.
+        ``encode_page_batch(pages)`` previously sent the complete validation
+        corpus through the ViT in one call.  A few hundred document pages are
+        enough to exhaust even a large GPU, especially when hidden states are
+        requested.  Chunking makes peak memory depend on ``batch_size`` rather
+        than corpus size.
         """
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
         self.pages = pages
         self._page_id_to_idx = {p.page_id: i for i, p in enumerate(pages)}
 
+        if not pages:
+            self.page_vectors = torch.empty((0, self.encoder.config.proj_dim))
+            return
+
         self.encoder.eval()
+        chunks: list[torch.Tensor] = []
         with torch.no_grad():
-            self.page_vectors = self.encoder.encode_page_batch(pages)
-            # Shape: [N, proj_dim], each row L2-normalised
+            for start in range(0, len(pages), batch_size):
+                page_batch = pages[start : start + batch_size]
+                vectors = self.encoder.encode_page_batch(page_batch)
+                chunks.append(vectors.detach().to(storage_device))
+            self.page_vectors = torch.cat(chunks, dim=0)
+            # Shape: [N, proj_dim], each row L2-normalised.
 
     # ═══════════════════════════════════════════════════════════
     # 在线检索
@@ -65,8 +85,11 @@ class DualTowerRetriever:
         For production-scale N, replace with FAISSVectorIndex.
         """
         self.encoder.eval()
+        if self.page_vectors is None:
+            raise RuntimeError("Retriever index is empty; call index() first")
         with torch.no_grad():
             query_vec = self.encoder.encode_query(query)  # [proj_dim]
+            query_vec = query_vec.to(self.page_vectors.device)
 
         # Inner product = cosine because both query_vec and page_vectors
         # are L2-normalised

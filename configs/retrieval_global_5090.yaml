@@ -1,0 +1,37 @@
+task: retrieval_global
+device: cuda
+model: checkpoint
+data_root: data
+manifest_dir: data/manifests/retrieval
+output_dir: models/retrieval_global
+
+# Resolved on the 5090 by scripts/profile_training_memory.py.
+batch_size: 128
+gradient_accumulation_steps: 1
+epochs: 10
+
+lora_rank: 64
+lora_alpha: 64
+lora_dropout: 0.05
+use_rslora: true
+selected_layers: [0, 8, 16, 23, 27]
+max_query_length: 96
+gradient_checkpointing: false
+
+lora_learning_rate: 5.0e-5
+projection_learning_rate: 2.0e-4
+layer_weight_learning_rate: 5.0e-4
+temperature: 0.05
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+num_workers: 8
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 2
+
+memory:
+  target_reserved_gb: 26.0
+  max_reserved_gb: 28.0
+  max_device_used_gb: 29.0

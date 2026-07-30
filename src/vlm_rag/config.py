@@ -21,6 +21,7 @@ class ProjectConfig:
     # ── 训练超参数 ──
     batch_size: int = 8
     gradient_accumulation_steps: int = 4
+    index_batch_size: int = 2
     learning_rate: float = 5e-5
     warmup_ratio: float = 0.025
     max_grad_norm: float = 1.0
@@ -109,6 +110,9 @@ def load_config(path: Path) -> ProjectConfig:
         batch_size=_parse_int(values.get("batch_size"), defaults.batch_size),
         gradient_accumulation_steps=_parse_int(
             values.get("gradient_accumulation_steps"), defaults.gradient_accumulation_steps
+        ),
+        index_batch_size=_parse_int(
+            values.get("index_batch_size"), defaults.index_batch_size
         ),
         learning_rate=_parse_float(values.get("learning_rate"), defaults.learning_rate),
         warmup_ratio=_parse_float(values.get("warmup_ratio"), defaults.warmup_ratio),

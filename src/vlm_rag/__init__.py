@@ -10,5 +10,7 @@ __all__ = [
     "logging_utils",
     "metrics",
     "retriever",
+    "retrieval",
+    "sensitivity",
     "training",
 ]

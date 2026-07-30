@@ -1,318 +1,390 @@
-# VLM-RAG：基于页面图像的视觉检索增强生成
+# 文档敏感性筛查与多向量 VLM-RAG
 
-<div align="center">
+本仓库包含两个边界清晰、可以串联但不能混用数据语义的研究任务：
 
-**面向复杂企业文档的页面级跨模态检索与多页视觉问答原型**
+1. **Sensitivity classification**：输入普通文档页面图像，判断页面是否需要进入脱敏/人工复核流程。
+2. **Retrieval / RAG**：输入问题，在完整 DocVQA 页面中检索相关页面，再将候选页交给视觉问答模块。
 
-[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-red.svg)](https://pytorch.org/)
-[![ColPali](https://img.shields.io/badge/Retriever-ColPali-green.svg)](https://huggingface.co/vidore/colpali-v1.3-merged)
+`data/desensitized` 是从完整 DocVQA 中筛选出的分类正标签集合，不是独立语料，也不是 RAG 数据根。分类器只做页面级风险筛查，不会涂黑、删除或覆盖原图。
 
-</div>
+## 1. 数据语义
 
-## 项目简介
-
-传统文档 RAG 通常依赖“OCR → 文本切分 → 文本向量检索”。当输入包含表格、图表、签章、多栏排版或手写内容时，OCR 错误和版面信息丢失会继续影响召回与生成。
-
-本项目将文档页作为基本检索单元：文本问题和页面图像分别经过文本塔与视觉塔，被投影到同一向量空间；系统检索 Top-K 页面后，调用视觉语言模型逐页提取候选答案，再结合检索分数与模型置信度完成融合。主检索链路不依赖 OCR，OCR 数据仅可作为数据筛选或对照实验的辅助信息。
-
-本仓库目前是研究原型，不是已经完成生产验收的系统。代码中同时存在新版 ColPali 主链路和早期轻量 Demo 的遗留入口；使用前请先阅读“当前实现状态与已知限制”。
-
-## 系统架构
-
-### 1. 离线页面编码
-
-```text
-文档页面图像 + 页面元数据
-        │
-        ▼
-冻结的 SigLIP ViT
-        │
-        ▼
-选定隐藏层 [0, 8, 16, 23]
-        │
-        ▼
-可学习 Softmax 权重融合
-        │
-        ▼
-Patch 均值池化 → 视觉投影头 → L2 归一化
-        │
-        ▼
-页面向量矩阵 [N, 768]
-```
-
-当前 `DualTowerRetriever` 将页面向量保存在内存中的 PyTorch Tensor 中。仓库尚未把新版 ColPali 检索器接入可持久化的 FAISS、Milvus 或 Elasticsearch 索引。
-
-### 2. 在线问题检索
-
-```text
-用户问题
-   │
-   ▼
-Gemma 文本塔 + LoRA
-   │
-   ▼
-Masked Mean Pooling → 文本投影头 → L2 归一化
-   │
-   ▼
-问题向量 [768]
-   │
-   ├── 与页面向量做内积（等价于余弦相似度）
-   ▼
-Top-K 页面
-```
-
-训练阶段使用 InfoNCE：同一 batch 中第 `i` 个问题与第 `i` 个页面构成正样本，其余页面作为 batch 内负样本。视觉主干保持冻结，LoRA、隐藏层融合权重和两个投影头参与训练。
-
-### 3. 多页视觉问答
-
-```text
-用户问题 + Top-K 页面
-          │
-          ▼
-逐页调用 Doubao Vision API
-          │
-          ▼
-{relevant, answer, evidence_quote, confidence}
-          │
-          ▼
-combined_score = retrieval_score × vlm_confidence
-          │
-          ▼
-归一化后的同答案合并分数
-          │
-          ▼
-最终答案 + 证据页面 ID + 融合置信度
-```
-
-当前最终 `Answer` 保存答案、证据页面 ID 和融合置信度；逐页返回的 `evidence_quote` 尚未传递到最终结果。
-
-## 核心实现
-
-- **页面级跨模态检索**：`ColPaliDualEncoder` 分别编码问题与页面图像，并输出 L2 归一化的 768 维全局向量。
-- **隐藏层加权池化**：从视觉塔选取 `[0, 8, 16, 23]` 层，使用可学习 Softmax 权重融合，再对图像 patch 做均值池化。
-- **参数高效训练**：视觉塔冻结；文本塔通过 LoRA 微调，同时训练隐藏层权重和投影头。
-- **InfoNCE 对比学习**：利用 batch 内负样本构造问题—页面对比目标。
-- **逐页视觉推理**：Top-K 页面分别调用视觉模型，避免直接拼接多页导致分辨率下降和注意力稀释。
-- **分数加权融合**：按“检索相似度 × VLM 置信度”累计相同答案的分数。
-- **图像拼接基线**：`ImageStitchingGenerator` 将 Top-K 页面纵向拼接，用于与逐页推理方案比较。
-- **文档级数据划分**：`split_by_document()` 按 `doc_id` 划分训练、验证和测试集，降低同文档跨集合泄漏的风险。
-
-## 当前实现状态与已知限制
-
-| 模块或入口 | 当前状态 |
-| --- | --- |
-| `src/vlm_rag/encoders.py` | 已实现 ColPali 双塔、隐藏层融合、LoRA 接入和 InfoNCE |
-| `src/vlm_rag/retriever.py` | 已实现基于内存 Tensor 的批量页面编码与 Top-K 检索 |
-| `src/vlm_rag/generator.py` | 已实现逐页 API 调用、重试、结构化解析和答案融合 |
-| `src/vlm_rag/baselines.py` | 已实现图像拼接生成基线；未实现 OCR-RAG、SigLIP 与原生 ColPali MaxSim 基线 |
-| `src/vlm_rag/data.py` | 已实现模拟数据构建、DocVQA 加载和文档级划分 |
-| `scripts/test_integration_generator.py` | 当前可在无 GPU、无 API Key 的环境中运行 Mock 与安全检查 |
-| `scripts/test_integration.py` | 当前会因测试期望 `colpali-v1.2`、配置使用 `v1.3-merged` 而失败 |
-| `scripts/run_demo.py`、`build_index.py`、`train_retriever.py`、`evaluate.py`、统一 CLI | 仍引用已移除的 `HashingVLMEncoder`、`EncoderConfig`、`train_retriever` 或 `evaluate_method`，暂不可作为有效入口 |
-| `scripts/train_colpali.py` | 是新版训练入口，但仍硬编码 `colpali-v1.2`，未完整使用 YAML 中的模型配置 |
-| `scripts/evaluate_generator.py` | 是新版生成评估入口，需要 GPU、DocVQA 和有效 API Key；真实 API 链路尚未在本仓库结果中完成复现 |
-
-另外需要注意：
-
-1. `configs/config.yaml` 中的 `embedding_dim: 384` 属于旧轻量链路配置；新版 `ColPaliDualEncoderConfig.proj_dim` 默认是 `768`，训练入口目前没有读取该字段。
-2. `configs/config.yaml` 使用 `vidore/colpali-v1.3-merged`，但 `ProjectConfig` 默认值和 `train_colpali_retriever()` 仍使用 `vidore/colpali-v1.2`。
-3. 配置中的 Doubao `base_url` 已包含 `/api/v3`，而 `generator.py` 又追加 `/api/v3/chat/completions`。真实调用前应统一 URL 拼接规则，避免出现重复路径。
-4. `index_store.py` 是旧轻量索引实现，依赖已经移除的哈希编码器；它不是当前 ColPali 检索器的持久化索引。
-5. 训练日志写入、短数据集验证频率和最佳模型保存逻辑仍需端到端验证，不应将现有 checkpoint 元数据视为正式实验结果。
-
-## 环境要求
-
-- Python 3.10+
-- 完整模型训练与评估建议使用 Linux、CUDA 和 NVIDIA GPU
-- ColPali 训练建议至少准备 24 GB 显存；实际占用取决于 batch size、图像尺寸和依赖版本
-- 逐页生成评估需要可访问 Doubao Vision API
-- 数据使用方需自行确认文档授权、脱敏要求和外部 API 传输合规性
-
-`requirements.txt` 包含完整模型栈，其中 `bitsandbytes`、`flash-attn` 和 CUDA 版本需要与操作系统、显卡驱动和 PyTorch 匹配。Windows 环境通常不适合作为完整训练环境。
-
-## 安装
-
-```bash
-git clone https://github.com/gmy-c/vlm-rag.git
-cd vlm-rag
-python -m pip install -r requirements.txt
-```
-
-如果只检查生成器的 Mock 融合与安全逻辑，可先安装轻量依赖：
-
-```bash
-python -m pip install Pillow requests
-python scripts/test_integration_generator.py
-```
-
-该测试不会发起真实 Doubao API 请求。
-
-## 数据准备
-
-本项目的数据结构适配 DocVQA SP-DocVQA Task 1。下载数据后可整理为：
+物理目录无需重排，也不需要复制图片：
 
 ```text
 data/
-├── docvqa_extracted/
-│   ├── train_v1.0_withQT.json
-│   ├── val_v1.0_withQT.json
-│   └── test_v1.0.json
-├── docvqa_images/
-└── ocr/                         # 可选，不进入主检索链路
+├── docvqa_images/                 # 完整页面：12,767
+├── ocr/                           # 完整 OCR
+├── docvqa_extracted/              # 完整 QA JSON
+└── desensitized/
+    ├── docvqa_images/             # 正样本页面：3,538
+    ├── ocr/
+    └── docvqa_extracted/
 ```
 
-加载示例：
-
-```python
-from pathlib import Path
-
-from vlm_rag.data import load_docvqa_dataset, split_by_document
-
-pages, queries = load_docvqa_dataset(
-    Path("data/docvqa_extracted/train_v1.0_withQT.json"),
-    Path("data/docvqa_images"),
-    split_name="train",
-)
-
-splits = split_by_document(
-    pages,
-    queries,
-    train_ratio=0.70,
-    val_ratio=0.15,
-    seed=42,
-)
-
-train_pages, train_queries = splits["train"]
-val_pages, val_queries = splits["val"]
-test_pages, test_queries = splits["test"]
-```
-
-`load_docvqa_dataset()` 当前只取每条标注的第一个标准答案，并通过 `question_types` 做粗粒度文档类型推断；这两点在正式实验中应按评估协议进一步完善。
-
-## 训练与评估
-
-### ColPali 检索器训练
-
-新版训练入口为：
-
-```bash
-python scripts/train_colpali.py \
-  --config configs/config.yaml \
-  --data-root data \
-  --train-qa docvqa_extracted/train_v1.0_withQT.json \
-  --images-dir docvqa_images \
-  --epochs 5 \
-  --batch_size 8 \
-  --device cuda
-```
-
-这里显式传入相对于 `--data-root` 的路径，是为了避免脚本默认参数再次拼接 `data/`。在正式训练前，还应先统一 `v1.2` 与 `v1.3-merged` 的模型配置，并修正“已知限制”中列出的训练问题。
-
-### 生成器评估
-
-Linux/macOS：
-
-```bash
-export DOUBAO_API_KEY="your-key"
-python scripts/evaluate_generator.py \
-  --data-root data \
-  --sample 10 \
-  --top-k 3 \
-  --device cuda
-```
-
-Windows PowerShell：
-
-```powershell
-$env:DOUBAO_API_KEY = "your-key"
-python scripts/evaluate_generator.py `
-  --data-root data `
-  --sample 10 `
-  --top-k 3 `
-  --device cuda
-```
-
-在修正 API URL 拼接前，不应将此命令视为可直接复现的完整评估入口。生成评估会把页面图像发送到所配置的外部 API；请勿直接使用未经授权或未脱敏的企业文档。
-
-## 配置说明
-
-主要配置位于 `configs/config.yaml`：
-
-```yaml
-top_k: 3
-temperature: 0.07
-epochs: 5
-
-batch_size: 8
-gradient_accumulation_steps: 4
-learning_rate: 5.0e-5
-
-colpali_model: "vidore/colpali-v1.3-merged"
-lora_rank: 32
-lora_alpha: 32
-selected_layers_str: "0,8,16,23"
-
-generator:
-  backend: "doubao"
-  doubao_model: "doubao-seed-1-6-vision-250815"
-  timeout: 30
-```
-
-API Key 不写入配置文件，由 `ProjectConfig.get_api_key()` 从 `DOUBAO_API_KEY` 环境变量读取。当前代码提供超时和最多三次请求尝试，但没有完整的审计、访问控制、密钥轮换或生产级日志脱敏机制。
-
-## 项目结构
+标签定义：
 
 ```text
-.
-├── README.md
-├── PROJECT_GUIDE.md
-├── requirements.txt
-├── configs/
-│   └── config.yaml
-├── docs/
-│   └── technical_report.md
-├── scripts/
-│   ├── train_colpali.py
-│   ├── evaluate_generator.py
-│   ├── test_integration.py
-│   ├── test_integration_generator.py
-│   └── ...                         # 早期轻量 Demo 入口，见状态表
-└── src/vlm_rag/
-    ├── config.py
-    ├── data.py
-    ├── encoders.py
-    ├── retriever.py
-    ├── training.py
-    ├── generator.py
-    ├── baselines.py
-    ├── metrics.py
-    ├── index_store.py
-    ├── pipeline.py
-    └── workflows.py
+完整页面位于 desensitized/docvqa_images 中 → is_sensitive = 1
+否则                                      → is_sensitive = 0
 ```
 
-## 指标口径
+当前完整数据核验结果为：
 
-- `MRR@10`：正确证据页首次出现排名的倒数均值。
-- `Recall@K`：Top-K 中至少命中一个正例页面的问题比例。
-- `EM`：预测答案与标准答案归一化后完全一致的比例。
-- `Accuracy`：当前实现与 EM 使用相同计算逻辑，因此两者数值相同。
+| 项目 | 数量 |
+| --- | ---: |
+| 页面 | 12,767 |
+| 正样本 | 3,538 |
+| 负样本 | 9,229 |
+| 文档 | 6,071 |
+| QA 查询 | 50,000 |
 
-项目文档中出现的 `MRR@10 = 77.91`、`Top-3 Accuracy = 56.12` 和 `121 ms/page` 等数字属于原始项目目标或方案参考值，不是由当前仓库可复现脚本生成的实测结果。正式报告应同时给出数据划分、样本量、硬件、模型版本、随机种子和原始输出文件。
+分类和检索均复用同一套按 `doc_id` 生成的 70/15/15 划分。官方 QA split 中相同文档存在交叉，因此不能直接作为本项目的分类/检索实验划分。
 
-## 安全与隐私
+## 2. 架构
 
-- API Key 仅从环境变量读取，不应提交到代码、YAML、日志或实验输出。
-- HTTP 请求设置了超时和重试；请求失败时生成器返回安全兜底结果。
-- 页面图像会以 Base64 形式发送给配置的 Doubao 接口，敏感数据必须在发送前完成授权与脱敏。
-- 当前 `base_url` 可配置，但代码未实现域名白名单；“只会发送到某一固定域名”并不是现有代码能够强制保证的安全属性。
-- 仓库中的安全测试属于静态检查和 Mock 测试，不能替代渗透测试、合规评审或生产审计。
+### 2.1 需脱敏页面分类
 
-## 参考资料
+```text
+页面图像 448×448
+      │
+      ▼
+SigLIP ViT（选取 0/8/16/23/27 层）
+      │
+      ├── 每层 32×32 patch 网格
+      │
+      ▼
+自适应区域池化
+  本地配置：8×8 = 64 tokens
+  5090 配置：16×16 = 256 tokens
+      │
+      ▼
+可学习多层融合 → 区域投影 → 2 层 Transformer + CLS
+      │
+      ▼
+页面敏感概率
+```
 
-- [ColPali: Efficient Document Retrieval with Vision Language Models](https://arxiv.org/abs/2407.01449)
-- [DocVQA: A Dataset for VQA on Document Images](https://www.docvqa.org/)
-- [PaliGemma](https://ai.google.dev/gemma)
-- [ColPali v1.3](https://huggingface.co/vidore/colpali-v1.3-merged)
-- [火山引擎方舟 API 文档](https://www.volcengine.com/docs/82379)
+旧实现会在分类头之前把整个页面压成一个向量，容易丢失金额、表格单元格和局部字段。当前实现保留区域 token，只有在区域间完成注意力交互后才用 CLS 做二分类。
+
+OCR 不进入主分类器。当前正标签本身由 OCR 规则辅助构建，直接输入 OCR 会使模型倾向于复现标签规则，形成标签泄漏。OCR 仅用于数据审计和未来独立 baseline。
+
+5090 训练分两阶段：
+
+- 阶段 1：冻结完整 ViT，训练区域 Transformer、分类头和层权重；
+- 阶段 2：从阶段 1 权重初始化，只解冻 ViT 最后 4 层，小学习率微调。
+
+最佳 checkpoint 优先满足目标 Recall（默认 0.90），再比较 Precision、PR-AUC 和 F1，而不是仅追求 Accuracy。
+
+### 2.2 多向量检索
+
+```text
+阶段 A：大 batch 全局预训练
+Query → Gemma + LoRA rank 64 ─┐
+                              ├→ 768-d 全局向量 → 对称 InfoNCE
+Page  → frozen SigLIP ────────┘   batch 96/128 候选
+                    │
+                    ▼
+       全局模型挖掘 hard negatives
+                    │
+                    ▼
+阶段 B：原生 ColPali late interaction
+Query tokens [Lq,128] × Page tokens [1024,128]
+                    │
+                    ▼
+ exact MaxSim + global loss + hard-negative loss + memory queue
+```
+
+正式 late-interaction 路径不再把页面压成单个 768 维向量。每页保留 1,024 个 ColPali image token，查询保留有效文本 token，并使用精确 MaxSim。全局向量仅负责粗排和辅助损失。
+
+MaxSim 优先使用 `late-interaction-kernels`（LIK）；未安装时可使用精确的分块 PyTorch 后端。分块后端不会构造完整的 `B×B×Lq×Ld` 张量，因此显存不会随语料总页数增长。
+
+持久化索引按 shard 保存页面 token，搜索时先用 CPU 中的全局向量粗排，再仅把候选 token 分批送入 GPU 重排。
+
+## 3. 环境
+
+已验证的本地环境位于 `E:\envs\vlm`。关键版本见 `requirements.txt`。Linux/RTX 5090 建议：
+
+```bash
+python -m pip install torch==2.7.1 torchvision==0.22.1 \
+  --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
+python -m pip install "colpali-engine[lik]==0.3.17"
+```
+
+如果 LIK 暂不支持服务器上的具体 CUDA/PyTorch 组合，将配置中的 `maxsim_backend` 改为 `chunked`，结果仍是精确 MaxSim，只是速度较慢。
+
+缓存、环境和临时目录应放在数据盘：
+
+```bash
+export VLM_CACHE_ROOT=/data/cache/vlm
+export HF_HOME=$VLM_CACHE_ROOT/huggingface
+export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
+export TORCH_HOME=$VLM_CACHE_ROOT/torch
+export PIP_CACHE_DIR=$VLM_CACHE_ROOT/pip
+export TMPDIR=$VLM_CACHE_ROOT/tmp
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+```
+
+## 4. 构建 manifest
+
+```bash
+python scripts/build_sensitivity_manifest.py --data-root "$DOCVQA_DATA_ROOT"
+
+python scripts/build_retrieval_manifest.py \
+  --data-root "$DOCVQA_DATA_ROOT"
+```
+
+输出：
+
+```text
+data/manifests/
+├── sensitivity/
+│   ├── all.jsonl
+│   ├── train.jsonl
+│   ├── val.jsonl
+│   ├── test.jsonl
+│   ├── summary.json
+│   └── anomalies.json
+└── retrieval/
+    ├── all.jsonl
+    ├── train.jsonl
+    ├── val.jsonl
+    ├── test.jsonl
+    └── summary.json
+```
+
+manifest 内路径是相对于 `data-root` 的 POSIX 路径，可在 Windows 生成后原样上传 Linux。构建过程不移动、不复制、不重命名数据。
+
+本地实际生成的 retrieval 划分：
+
+| split | 查询 | 页面 | 文档 |
+| --- | ---: | ---: | ---: |
+| train | 35,153 | 8,937 | 4,256 |
+| val | 7,291 | 1,925 | 895 |
+| test | 7,556 | 1,905 | 920 |
+
+三个 split 的 `doc_id` 交集均为 0。
+
+## 5. 本地 12GB 验证
+
+```powershell
+E:\envs\vlm\python.exe -m unittest discover -s tests -v
+
+E:\envs\vlm\python.exe scripts\smoke_sensitivity.py `
+  --data-root ..\data `
+  --model ..\checkpoint `
+  --batch-size 2 `
+  --samples-per-class 2
+```
+
+本机 RTX 4080 Laptop 实测：
+
+| 检查 | 峰值 reserved |
+| --- | ---: |
+| 区域分类头，冻结 ViT，batch 2，真实前向/反向 | 1.17 GB |
+| 分类器解冻最后 4 层，batch 1，真实前向/反向 | 1.19 GB |
+| 原生 ColPali 多向量，rank 64，batch 1，query/page 前向 | 10.81 GB |
+
+最后一项已接近 12GB 上限，因此本机不强行执行 late-interaction 反向；这不是 5090 正式 batch 的测量结果。
+
+## 6. RTX 5090 显存标定
+
+配置中的 batch 是安全起点，不是假定的实测结论。租到 5090 后先在独立进程中运行真实 optimizer step：
+
+```bash
+python scripts/profile_training_memory.py \
+  --task sensitivity-head \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --work-dir "$PROFILE_ROOT"
+
+python scripts/profile_training_memory.py \
+  --task sensitivity-unfreeze4 \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --work-dir "$PROFILE_ROOT"
+
+python scripts/profile_training_memory.py \
+  --task global \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --work-dir "$PROFILE_ROOT"
+
+python scripts/profile_training_memory.py \
+  --task late \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --work-dir "$PROFILE_ROOT"
+```
+
+脚本逐候选 batch 启动新进程，记录 `max_memory_allocated/reserved`，默认硬上限为 28GB，并清理每次 profile 产生的临时 checkpoint。建议目标是 reserved 26–28GB；不要以 `nvidia-smi` 的瞬时占用代替 PyTorch 峰值。
+
+初始候选：
+
+| 任务 | 候选 physical batch |
+| --- | --- |
+| Sensitivity head，256 区域 token | 16 / 24 / 32 / 40 |
+| Sensitivity 解冻最后 4 层 | 8 / 12 / 16 / 24 |
+| Retrieval global | 64 / 96 / 128 |
+| Retrieval late interaction | 2 / 4 / 6 / 8 |
+
+## 7. Sensitivity 正式训练
+
+阶段 1：
+
+```bash
+python scripts/train_sensitivity.py \
+  --config configs/sensitivity_head_5090.yaml \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --output-dir "$SENSITIVITY_HEAD_DIR"
+```
+
+阶段 2 只继承模型权重，不继承阶段 1 的 optimizer 状态：
+
+```bash
+python scripts/train_sensitivity.py \
+  --config configs/sensitivity_unfreeze4_5090.yaml \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --init-checkpoint "$SENSITIVITY_HEAD_DIR/best.pt" \
+  --output-dir "$SENSITIVITY_FINETUNE_DIR"
+```
+
+同一阶段中断续训才使用：
+
+```bash
+python scripts/train_sensitivity.py ... \
+  --resume "$SENSITIVITY_FINETUNE_DIR/last.pt"
+```
+
+评估与阈值校准：
+
+```bash
+python scripts/evaluate_sensitivity.py \
+  --checkpoint "$SENSITIVITY_FINETUNE_DIR/best.pt" \
+  --model "$COLPALI_MODEL_PATH" \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --target-recall 0.90 \
+  --output-dir "$SENSITIVITY_EVAL_DIR"
+```
+
+批量分类：
+
+```bash
+python scripts/classify_pages.py \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/sensitivity/all.jsonl" \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --checkpoint "$SENSITIVITY_FINETUNE_DIR/best.pt" \
+  --model "$COLPALI_MODEL_PATH" \
+  --calibration "$SENSITIVITY_EVAL_DIR/calibration.json" \
+  --batch-size 16 \
+  --format both \
+  --output-dir "$SENSITIVITY_PRED_DIR"
+```
+
+损坏图片会写入 `errors.jsonl`；其他页面继续处理，但任务最终非零退出，避免静默漏页。
+
+## 8. Retrieval 正式训练
+
+### 8.1 全局阶段
+
+```bash
+python scripts/train_retrieval_global.py \
+  --config configs/retrieval_global_5090.yaml \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --output-dir "$RETRIEVAL_GLOBAL_DIR"
+```
+
+同一 batch 内不允许重复 `doc_id` 或正例页面，避免同文档页面成为假负例。损失同时计算 query→page 和 page→query。
+
+### 8.2 挖掘 hard negatives
+
+```bash
+python scripts/mine_global_hard_negatives.py \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/retrieval/train.jsonl" \
+  --checkpoint "$RETRIEVAL_GLOBAL_DIR" \
+  --base-model "$COLPALI_MODEL_PATH" \
+  --output "$DOCVQA_DATA_ROOT/manifests/retrieval/hard_negatives.jsonl" \
+  --page-batch-size 64 \
+  --query-batch-size 128
+```
+
+负例会排除正页面以及相同 `doc_id` 的页面。
+
+### 8.3 原生多向量阶段
+
+```bash
+python scripts/train_retrieval_late.py \
+  --config configs/retrieval_late_5090.yaml \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --hard-negatives "$DOCVQA_DATA_ROOT/manifests/retrieval/hard_negatives.jsonl" \
+  --init-global "$RETRIEVAL_GLOBAL_DIR/lora" \
+  --output-dir "$RETRIEVAL_LATE_DIR"
+```
+
+该命令继承全局阶段的 rank-64 LoRA，不重复套 LoRA；late 阶段保存的 `best/` 和 `last/` 只包含 LoRA、ColPali token projection、粗排池化头及元数据。
+
+### 8.4 建索引和评估
+
+```bash
+python scripts/build_multivector_index.py \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/retrieval/all.jsonl" \
+  --model "$COLPALI_MODEL_PATH" \
+  --adapter "$RETRIEVAL_LATE_DIR/best" \
+  --output-dir "$RETRIEVAL_INDEX_DIR" \
+  --batch-size 4 \
+  --pages-per-shard 128
+
+python scripts/evaluate_retrieval_multivector.py \
+  --manifest "$DOCVQA_DATA_ROOT/manifests/retrieval/test.jsonl" \
+  --index-dir "$RETRIEVAL_INDEX_DIR" \
+  --model "$COLPALI_MODEL_PATH" \
+  --adapter "$RETRIEVAL_LATE_DIR/best" \
+  --coarse-top-k 128 \
+  --maxsim-backend lik \
+  --output "$RETRIEVAL_LATE_DIR/test_metrics.json"
+```
+
+可在完成一轮 late 训练后使用 `mine_hard_negatives.py` 基于精确 MaxSim 刷新更难的负例，再训练第二轮。
+
+## 9. 测试与验收
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall -q src scripts tests
+python scripts/test_integration.py
+python scripts/test_integration_generator.py
+python -m pip check
+git diff --check
+```
+
+项目级结构与真实 GPU 前向：
+
+```bash
+python scripts/validate_project.py \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH"
+```
+
+## 10. 常见问题
+
+| 现象 | 原因与处理 |
+| --- | --- |
+| manifest 数量不对 | `--data-root` 必须指向同时包含四个顶层部分的完整数据根，不能指向 `desensitized` |
+| split 泄漏 | 重新运行两个 manifest 构建脚本；不要直接沿用官方 QA split |
+| 12GB 上 late backward OOM | 正常；本机只验证 batch-1 前向，正式训练用 5090 profile 后的 batch |
+| 5090 没用满 | 依次 profile 更大 physical batch；不要先盲目增大梯度累积 |
+| LIK 加载失败 | 安装 `colpali-engine[lik]`，或切到精确 `chunked` 后端 |
+| hard negatives 数量少 | 候选被相同文档过滤；提高 `candidate-top-k` |
+| 阶段 2 checkpoint mismatch | 阶段切换用 `--init-checkpoint`，同阶段续训才用 `--resume` |
+| 指标异常好 | 确认没有输入 OCR、没有文档交叉，并区分 smoke/tiny 与正式 test 指标 |
+
+## 11. 当前验证边界
+
+已在本地完成数据全量 manifest 构建、单元测试、Sensitivity 两种冻结状态的真实前向/反向、原生 ColPali rank-64 多向量前向和精确 MaxSim。尚未完成的项目是 RTX 5090 上的 batch 标定、全量训练、全量索引和正式 test 指标；这些结果不能在实际运行前预填。

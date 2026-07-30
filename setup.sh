@@ -1,177 +1,173 @@
 #!/usr/bin/env bash
-# ============================================================
-# VLM-RAG 服务器一键环境配置脚本
-# 使用方法: bash setup.sh
-# ============================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# Reproducible Linux setup for both project tasks:
+#   1) sensitivity classification
+#   2) ColPali retrieval / visual RAG
+#
+# This script never downloads a model checkpoint. Put the local checkpoint at
+# COLPALI_MODEL_PATH before running GPU smoke tests.
 
-echo "============================================================"
-echo "  VLM-RAG 环境配置"
-echo "  项目路径: $SCRIPT_DIR"
-echo "============================================================"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_ROOT"
 
-# ── 1. 环境变量检查 ──
-echo ""
-echo "[1/4] 检查环境变量..."
+PYTHON_BIN="${VLM_PYTHON:-python3}"
+DATA_ROOT="${DOCVQA_DATA_ROOT:-$PROJECT_ROOT/data}"
+MODEL_ROOT="${COLPALI_MODEL_PATH:-$PROJECT_ROOT/checkpoint}"
+CACHE_ROOT="${VLM_CACHE_ROOT:-$PROJECT_ROOT/.cache/vlm}"
+TORCH_INDEX_URL="${VLM_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+NO_INSTALL=0
 
-if [ ! -f .env ]; then
-    if [ -f .env.example ]; then
-        cp .env.example .env
-        echo "  已从 .env.example 创建 .env，请编辑填入 DOUBAO_API_KEY"
-        echo "  vim .env"
-    fi
-else
-    echo "  .env 已存在"
-fi
-
-# shellcheck disable=SC1090
-source .env 2>/dev/null || true
-
-if [ -z "${DOUBAO_API_KEY:-}" ] || [ "$DOUBAO_API_KEY" = "your-doubao-api-key-here" ]; then
-    echo "  ⚠ 警告: DOUBAO_API_KEY 未设置！评估脚本将无法调用 API。"
-    echo "  编辑 .env 文件并填入真实 Key，然后重新运行本脚本。"
-else
-    KEY_LEN=${#DOUBAO_API_KEY}
-    echo "  ✓ DOUBAO_API_KEY 已设置 (${KEY_LEN} 字符)"
-fi
-
-# ── 2. Python 环境 ──
-echo ""
-echo "[2/4] 检查 Python 环境..."
-
-PYTHON=""
-for candidate in python3 python python3.10 python3.11 python3.12 python3.13; do
-    if command -v "$candidate" &>/dev/null; then
-        PYTHON="$candidate"
-        break
-    fi
+for argument in "$@"; do
+    case "$argument" in
+        --no-install) NO_INSTALL=1 ;;
+        *)
+            echo "Unknown argument: $argument"
+            echo "Usage: bash setup.sh [--no-install]"
+            exit 2
+            ;;
+    esac
 done
 
-if [ -z "$PYTHON" ]; then
-    echo "  ✗ 错误: 未找到 Python！请安装 Python 3.10+"
+export DOCVQA_DATA_ROOT="$DATA_ROOT"
+export COLPALI_MODEL_PATH="$MODEL_ROOT"
+export HF_HOME="${HF_HOME:-$CACHE_ROOT/huggingface}"
+export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
+export TORCH_HOME="${TORCH_HOME:-$CACHE_ROOT/torch}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$CACHE_ROOT/pip}"
+export TMPDIR="${TMPDIR:-$CACHE_ROOT/tmp}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TORCH_HOME" "$PIP_CACHE_DIR" "$TMPDIR"
+
+echo "========================================================================"
+echo "Project setup"
+echo "  project:      $PROJECT_ROOT"
+echo "  python:       $PYTHON_BIN"
+echo "  data:         $DATA_ROOT"
+echo "  base model:   $MODEL_ROOT"
+echo "  cache:        $CACHE_ROOT"
+echo "========================================================================"
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    echo "ERROR: Python executable not found: $PYTHON_BIN"
     exit 1
 fi
+"$PYTHON_BIN" -c \
+    'import sys; assert sys.version_info >= (3, 10), sys.version; print("Python", sys.version)'
 
-PY_VER=$("$PYTHON" --version 2>&1)
-echo "  ✓ $PY_VER ($PYTHON)"
-
-# ── 3. CUDA 检查 ──
-echo ""
-echo "[3/5] 检查 CUDA 环境..."
-
-if command -v nvidia-smi &>/dev/null; then
-    DRIVER_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
-    CUDA_VER=$(nvidia-smi 2>/dev/null | grep "CUDA Version" | sed 's/.*CUDA Version: //' | cut -d' ' -f1)
-    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
-    export GPU_NAME
-    echo "  GPU:           $GPU_NAME"
-    echo "  Driver:        $DRIVER_VER"
-    echo "  CUDA:          $CUDA_VER"
-
-    # RTX 5090 检查
-    if echo "$GPU_NAME" | grep -qi "5090"; then
-        echo ""
-        echo "  ⚠ 检测到 RTX 5090 (Blackwell 架构)！"
-        echo "  RTX 5090 需要 CUDA >= 12.8 + PyTorch 2.7+"
-        if [ "${CUDA_VER:-0}" \< "12.8" ] 2>/dev/null || [ "$CUDA_VER" = "12.8" ]; then
-            :
-        else
-            echo "  当前 CUDA $CUDA_VER 可能不兼容，需要 >= 12.8"
-        fi
-    fi
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 else
-    echo "  ⚠ nvidia-smi 不可用，跳过 GPU 检测"
+    echo "WARNING: nvidia-smi is unavailable; GPU checks will run in validate_project.py"
 fi
 
-# ── 4. 安装依赖 ──
-echo ""
-echo "[4/5] 安装 Python 依赖..."
-
-if [ "${1:-}" = "--no-install" ]; then
-    echo "  跳过安装 (--no-install)"
-else
-    echo "  升级 pip ..."
-    "$PYTHON" -m pip install --upgrade pip -q
-
-    # RTX 5090: 从 cu128 索引安装 PyTorch 2.7+
-    if echo "${GPU_NAME:-}" | grep -qi "5090"; then
-        echo "  RTX 5090 检测到，使用 CUDA 12.8 PyTorch nightly ..."
-        "$PYTHON" -m pip install --pre torch torchvision \
-            --index-url https://download.pytorch.org/whl/nightly/cu128
-        echo ""
-        echo "  ▶ 说明: 使用了 PyTorch nightly build (CUDA 12.8)"
-        echo "    如果 PyTorch 2.7 稳定版已发布，可改用:"
-        echo "    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128"
+if [ "$NO_INSTALL" -eq 0 ]; then
+    if "$PYTHON_BIN" - <<'PY'
+import sys
+try:
+    import torch
+    import torchvision
+except Exception:
+    raise SystemExit(1)
+valid = torch.__version__.startswith("2.7.1") and torchvision.__version__.startswith("0.22.1")
+raise SystemExit(0 if valid else 1)
+PY
+    then
+        echo "Verified PyTorch/torchvision already installed; skipping reinstall."
     else
-        echo "  安装 PyTorch (CUDA 12.x) ..."
-        "$PYTHON" -m pip install torch torchvision
+        echo "Installing verified PyTorch 2.7.1 / torchvision 0.22.1 from $TORCH_INDEX_URL"
+        "$PYTHON_BIN" -m pip install \
+            torch==2.7.1 torchvision==0.22.1 \
+            --index-url "$TORCH_INDEX_URL"
     fi
+    "$PYTHON_BIN" -m pip install -r requirements.txt
+else
+    echo "Dependency installation skipped (--no-install)."
+fi
 
-    echo "  安装其余依赖 ..."
-    "$PYTHON" -m pip install -r requirements.txt
-
-    # flash-attn: 尝试安装，失败则跳过（会自动降级到 SDPA）
-    echo ""
-    echo "  尝试安装 flash-attn (RTX 5090 需要从源码编译) ..."
-    if "$PYTHON" -m pip install flash-attn --no-build-isolation 2>/dev/null; then
-        echo "  ✓ flash-attn 安装成功"
-    else
-        echo "  ℹ flash-attn 安装失败，将使用 PyTorch SDPA 作为替代"
-        echo "    这对训练不影响，只是注意力计算会稍慢 (~5-10%)"
+echo ""
+echo "Data audit"
+data_ok=1
+for relative in \
+    docvqa_extracted \
+    docvqa_images \
+    ocr \
+    desensitized/docvqa_extracted \
+    desensitized/docvqa_images \
+    desensitized/ocr
+do
+    if [ ! -d "$DATA_ROOT/$relative" ]; then
+        echo "  MISSING $DATA_ROOT/$relative"
+        data_ok=0
     fi
-
-    echo "  ✓ 依赖安装完成"
-fi
-
-# ── 5. 准备数据 ──
-echo ""
-echo "[5/5] 检查数据..."
-
-# DocVQA 数据检查
-if [ -d "data/docvqa_extracted" ] && [ -d "data/docvqa_images" ]; then
-    IMG_COUNT=$(find data/docvqa_images -name "*.png" 2>/dev/null | wc -l)
-    echo "  ✓ DocVQA 数据已就绪 ($IMG_COUNT 张图片)"
+done
+if [ "$data_ok" -eq 1 ]; then
+    full_count=$(find "$DATA_ROOT/docvqa_images" -maxdepth 1 -type f -name '*.png' | wc -l)
+    positive_count=$(find "$DATA_ROOT/desensitized/docvqa_images" -maxdepth 1 -type f -name '*.png' | wc -l)
+    echo "  full pages:      $full_count"
+    echo "  positive pages:  $positive_count"
 else
-    echo "  ⚠ DocVQA 数据未找到。请将数据放入:"
-    echo "    data/docvqa_extracted/  → Q&A JSON 文件"
-    echo "    data/docvqa_images/     → 页面 PNG 图片"
-    echo ""
-    echo "  下载方法:"
-    echo "    1. 访问 https://www.docvqa.org/datasets"
-    echo "    2. 下载 Task 1: Single Page Document Visual Question Answering"
-    echo "    3. 解压 Q&A JSON 到 data/docvqa_extracted/"
-    echo "    4. 解压图片到 data/docvqa_images/"
+    echo "WARNING: incomplete data; upload the full data tree before building manifests."
 fi
 
-# ColPali 权重检查
-if [ -d "models/colpali_retriever" ]; then
-    echo "  ✓ ColPali 训练权重已存在"
+echo ""
+echo "Checkpoint audit (no automatic download)"
+if [ -f "$MODEL_ROOT/config.json" ] \
+    && find "$MODEL_ROOT" -maxdepth 1 -type f -name '*.safetensors' -print -quit | grep -q .
+then
+    echo "  checkpoint present: $MODEL_ROOT"
 else
-    echo "  ℹ ColPali 权重将在首次运行 train_colpali.py 时自动从 HuggingFace 下载"
-    echo "    (~11GB, 下载时间取决于网速)"
-    echo "    如需预下载: python -c \"from colpali_engine.models import ColPali; ColPali.from_pretrained('vidore/colpali-v1.3-merged')\""
+    echo "WARNING: local checkpoint is incomplete: $MODEL_ROOT"
+    echo "         Upload config/tokenizer/processor files, the index, and all shards."
 fi
 
-# ── 验证 ──
 echo ""
-echo "============================================================"
-echo "  配置完成！"
-echo "============================================================"
-echo ""
-echo "  验证安装:"
-echo "    $PYTHON scripts/test_integration.py"
-echo "    $PYTHON scripts/test_integration_generator.py"
-echo ""
-echo "  训练 ColPali 检索器:"
-echo "    $PYTHON scripts/train_colpali.py"
-echo ""
-echo "  评估生成模块 (需 API Key):"
-echo "    $PYTHON scripts/evaluate_generator.py --sample 10"
-echo ""
-echo "  构建合成数据集（快速测试）:"
-echo "    $PYTHON scripts/build_dataset.py"
-echo ""
-echo "============================================================"
+echo "Running structural acceptance checks..."
+if [ ! -f "$DATA_ROOT/manifests/sensitivity/summary.json" ]; then
+    echo "Building missing sensitivity manifest..."
+    "$PYTHON_BIN" scripts/build_sensitivity_manifest.py \
+        --data-root "$DATA_ROOT"
+fi
+if [ ! -f "$DATA_ROOT/manifests/retrieval/summary.json" ]; then
+    echo "Building missing retrieval manifest..."
+    "$PYTHON_BIN" scripts/build_retrieval_manifest.py \
+        --data-root "$DATA_ROOT"
+fi
+"$PYTHON_BIN" scripts/validate_project.py \
+    --data-root "$DATA_ROOT" \
+    --model "$MODEL_ROOT" \
+    --skip-gpu-smoke \
+    --output "$PROJECT_ROOT/outputs/setup_validation.json"
+
+cat <<EOF
+
+========================================================================
+Setup finished. No checkpoint was downloaded.
+
+Export these variables in each new shell (or put them in .env):
+  export DOCVQA_DATA_ROOT="$DATA_ROOT"
+  export COLPALI_MODEL_PATH="$MODEL_ROOT"
+  export VLM_CACHE_ROOT="$CACHE_ROOT"
+
+Build both leak-free manifests:
+  $PYTHON_BIN scripts/build_sensitivity_manifest.py --data-root "$DATA_ROOT"
+  $PYTHON_BIN scripts/build_retrieval_manifest.py --data-root "$DATA_ROOT"
+
+Run complete project acceptance, including both real GPU forwards:
+  $PYTHON_BIN scripts/validate_project.py --data-root "$DATA_ROOT" --model "$MODEL_ROOT"
+
+Task A — sensitivity classification:
+  $PYTHON_BIN scripts/smoke_sensitivity.py --data-root "$DATA_ROOT" --model "$MODEL_ROOT"
+  $PYTHON_BIN scripts/train_sensitivity.py --config configs/sensitivity_head_5090.yaml --data-root "$DATA_ROOT" --model "$MODEL_ROOT"
+
+Profile the actual 5090 before formal training:
+  $PYTHON_BIN scripts/profile_training_memory.py --task sensitivity-unfreeze4 --data-root "$DATA_ROOT" --model "$MODEL_ROOT" --work-dir "$PROJECT_ROOT/outputs/profiles"
+  $PYTHON_BIN scripts/profile_training_memory.py --task global --data-root "$DATA_ROOT" --model "$MODEL_ROOT" --work-dir "$PROJECT_ROOT/outputs/profiles"
+  $PYTHON_BIN scripts/profile_training_memory.py --task late --data-root "$DATA_ROOT" --model "$MODEL_ROOT" --work-dir "$PROJECT_ROOT/outputs/profiles"
+
+Task B — global then native multi-vector retrieval:
+  $PYTHON_BIN scripts/train_retrieval_global.py --data-root "$DATA_ROOT" --model "$MODEL_ROOT"
+  $PYTHON_BIN scripts/train_retrieval_late.py --data-root "$DATA_ROOT" --model "$MODEL_ROOT"
+========================================================================
+EOF

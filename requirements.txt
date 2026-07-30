@@ -1,37 +1,36 @@
-# VLM-RAG dependencies — RTX 5090 (Blackwell) / CUDA 12.8+
+# Verified project dependencies — sensitivity classification + retrieval/RAG
 #
-# 重要：RTX 5090 需要 CUDA 12.8+，PyTorch 必须从 cu128 索引安装
-# 不要直接用 pip install torch，见下方 install 命令
+# Verified locally with Python 3.11, RTX 4080 Laptop and CUDA 12.8.
+# The same cu128 PyTorch build supports RTX 5090 when the driver is compatible.
 
 # ── PyTorch (CUDA 12.8) ──
-# 安装命令（不要写在 requirements.txt 中，单独执行）:
-#   pip install --pre torch>=2.7.0 torchvision>=0.22.0 --index-url https://download.pytorch.org/whl/nightly/cu128
-# 或等 2.7 稳定版发布后:
-#   pip install torch>=2.7.0 torchvision>=0.22.0 --index-url https://download.pytorch.org/whl/cu128
+# 已验证安装命令（不要写在 requirements.txt 中，单独执行）:
+#   pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
 
 # ── HuggingFace 生态 ──
-transformers>=4.50.0
-accelerate>=0.30.0
-peft>=0.12.0
-huggingface_hub>=0.20.0
+transformers==5.14.1
+accelerate==1.14.0
+peft==0.19.1
+huggingface_hub==1.25.1
+safetensors==0.8.0
 
 # ── ColPali 检索 ──
-colpali-engine>=0.3.0,<0.4.0
+colpali-engine==0.3.17
 
 # ── 优化器（需要 >=0.45.3 才支持 Blackwell sm_120）──
-bitsandbytes>=0.45.3
+bitsandbytes==0.50.0
 
 # ── Flash Attention（RTX 5090 上可选，预编译包可能不含 sm_120 内核）──
 # flash-attn 如果装不上，transformers 会自动降级到 SDPA，不影响训练
 # flash-attn>=2.7.0
 
 # ── 图像和 HTTP ──
-Pillow>=10.0.0
-requests>=2.28.0
+Pillow==12.2.0
+requests==2.34.2
 
 # ── 工具 ──
-numpy>=1.24.0
-PyYAML>=6.0
-sentencepiece>=0.2.0
-einops>=0.7.0
-tqdm>=4.65.0
+numpy==2.4.4
+PyYAML==6.0.3
+sentencepiece==0.2.2
+einops==0.8.2
+tqdm==4.70.0

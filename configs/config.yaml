@@ -1,3 +1,5 @@
+# Task boundary: query-to-page retrieval and downstream visual RAG.
+task: retrieval_rag
 data_dir: data
 output_dir: outputs
 model_dir: models
@@ -12,8 +14,10 @@ train_ratio: 0.7
 dev_ratio: 0.15
 
 # 训练参数
-batch_size: 8
-gradient_accumulation_steps: 4
+# 显存安全默认值：micro-batch 2，累计 16 次后有效 batch 仍为 32
+batch_size: 2
+gradient_accumulation_steps: 16
+index_batch_size: 2
 learning_rate: 5.0e-5
 warmup_ratio: 0.025
 max_grad_norm: 1.0

@@ -1,0 +1,51 @@
+task: retrieval_late_interaction
+device: cuda
+model: checkpoint
+data_root: data
+manifest_dir: data/manifests/retrieval
+hard_negatives: data/manifests/retrieval/hard_negatives.jsonl
+output_dir: models/retrieval_late
+
+micro_batch_size: 4
+gradient_accumulation_steps: 24
+epochs: 8
+queue_size: 256
+validation_batches: 20
+
+lora_rank: 64
+lora_alpha: 64
+lora_dropout: 0.05
+use_rslora: true
+max_query_length: 96
+gradient_checkpointing: true
+image_only_tokens: true
+global_dim: 768
+
+lora_learning_rate: 5.0e-5
+projection_learning_rate: 1.0e-4
+pooling_learning_rate: 2.0e-4
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+loss:
+  global_weight: 0.25
+  late_weight: 0.55
+  hard_negative_weight: 0.20
+  global_temperature: 0.05
+  late_temperature: 0.02
+  hard_negative_margin: 0.05
+  maxsim_backend: auto
+  query_batch_chunk: 1
+  document_batch_chunk: 1
+  query_token_chunk: 32
+
+num_workers: 8
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 2
+
+memory:
+  target_reserved_gb: 26.0
+  max_reserved_gb: 28.0
+  max_device_used_gb: 29.0

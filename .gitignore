@@ -26,12 +26,14 @@ data/sample_pages/
 data/docvqa_extracted/
 data/docvqa_images/
 data/desensitized/
+data/manifests/
 data/*.json
 
 # Environment
 .env
 .venv/
 venv/
+.cache/
 
 # IDE
 .vscode/

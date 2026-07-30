@@ -1,0 +1,39 @@
+task: sensitivity_classification_head_warmup
+seed: 42
+device: cuda
+dtype: bfloat16
+data_root: data
+manifest_dir: data/manifests/sensitivity
+model: checkpoint
+output_dir: models/sensitivity_head
+
+selected_layers: [0, 8, 16, 23, 27]
+spatial_pool_size: 16
+head_dim: 768
+head_layers: 2
+head_attention_heads: 12
+gradient_checkpointing: false
+dropout: 0.15
+unfreeze_last_n: 0
+
+# The 16x16 regional grid retains 256 spatial tokens. The profiler must choose
+# the final physical batch on the rented GPU.
+batch_size: 32
+gradient_accumulation_steps: 1
+epochs: 3
+learning_rate: 8.0e-4
+head_learning_rate: 8.0e-4
+vision_learning_rate: 1.0e-5
+layer_weight_learning_rate: 5.0e-4
+weight_decay: 0.01
+warmup_ratio: 0.05
+max_grad_norm: 1.0
+early_stopping_patience: 2
+target_recall: 0.90
+num_workers: 8
+prefetch_factor: 2
+
+memory:
+  target_reserved_gb: 26.0
+  max_reserved_gb: 28.0
+  max_device_used_gb: 29.0

@@ -1,0 +1,37 @@
+# Page-level sensitivity classification. OCR is intentionally not a model input.
+task: sensitivity_classification
+seed: 42
+device: "cuda"
+dtype: "bfloat16"
+
+# Data paths are resolved by scripts/train_sensitivity.py.
+data_root: "data"
+manifest_dir: "data/manifests/sensitivity"
+model: "checkpoint"
+output_dir: "models/sensitivity_classifier"
+
+# SigLIP hidden-state indices. Index 0 is patch embeddings; index 27 is the
+# output of the final encoder block.
+selected_layers: [0, 8, 16, 23, 27]
+dropout: 0.20
+unfreeze_last_n: 0
+spatial_pool_size: 8
+head_dim: 768
+head_layers: 2
+head_attention_heads: 12
+gradient_checkpointing: false
+
+batch_size: 2
+gradient_accumulation_steps: 8
+epochs: 10
+learning_rate: 1.0e-3
+head_learning_rate: 1.0e-3
+vision_learning_rate: 1.0e-5
+layer_weight_learning_rate: 5.0e-4
+weight_decay: 0.01
+warmup_ratio: 0.05
+max_grad_norm: 1.0
+early_stopping_patience: 3
+num_workers: 0
+prefetch_factor: 2
+target_recall: 0.90
