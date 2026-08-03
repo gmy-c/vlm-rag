@@ -24,7 +24,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--task",
-        choices=("global", "late", "sensitivity-head", "sensitivity-unfreeze4"),
+        choices=(
+            "global",
+            "late",
+            "late-symmetric",
+            "sensitivity-head",
+            "sensitivity-unfreeze4",
+        ),
         required=True,
     )
     parser.add_argument("--data-root", type=Path, required=True)
@@ -44,6 +50,10 @@ def main() -> int:
         "late": (
             Path("configs/retrieval_late_5090.yaml"),
             [2, 4, 6, 8],
+        ),
+        "late-symmetric": (
+            Path("configs/retrieval_late_symmetric_fast_5090.yaml"),
+            [4, 6, 8, 10],
         ),
         "sensitivity-head": (
             Path("configs/sensitivity_head_5090.yaml"),
@@ -177,6 +187,25 @@ def _command(
             "--num-workers", str(workers),
             "--max-train-samples", str(batch_size * 2),
             "--max-val-samples", str(batch_size),
+        ]
+        return command, output / "training_summary.json"
+    if task == "late-symmetric":
+        queries_per_page = int(raw.get("queries_per_page", 4))
+        command = common + [
+            "scripts/train_retrieval_late.py",
+            "--config", str(config),
+            "--data-root", str(data_root),
+            "--model", model,
+            "--output-dir", str(output),
+            "--pages-per-batch", str(batch_size),
+            "--queries-per-page", str(queries_per_page),
+            "--gradient-accumulation-steps", "1",
+            "--epochs", "1",
+            "--num-workers", str(workers),
+            "--max-train-samples", str(batch_size * queries_per_page * 2),
+            "--max-val-samples", str(max(batch_size, 8)),
+            "--retrieval-validation-queries", "0",
+            "--no-progress",
         ]
         return command, output / "training_summary.json"
     command = common + [

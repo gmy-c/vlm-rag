@@ -8,6 +8,7 @@ import torch
 
 
 MaxSimBackend = Literal["auto", "lik", "chunked"]
+MaxSimNormalization = Literal["mean", "sum"]
 
 
 def late_interaction_kernel_available() -> bool:
@@ -37,6 +38,7 @@ def maxsim_score_matrix(
     documents: torch.Tensor,
     *,
     backend: MaxSimBackend = "auto",
+    normalization: MaxSimNormalization = "mean",
     query_batch_chunk: int = 2,
     document_batch_chunk: int = 4,
     query_token_chunk: int = 32,
@@ -56,12 +58,20 @@ def maxsim_score_matrix(
             rows = []
             for q_start in range(0, len(queries), query_batch_chunk):
                 q = queries[q_start : q_start + query_batch_chunk]
+                # LIK treats zero-padded query tokens as zero-valued terms in
+                # the forward sum, but its fused argmax can still return a
+                # non-zero gradient for those all-tied tokens.  Masking before
+                # the kernel preserves the forward values and makes padding
+                # gradients match the explicit masked torch implementation.
+                valid = q[:, :, 0].ne(0).unsqueeze(-1).to(q.dtype)
+                q = q * valid
                 columns = []
                 for d_start in range(0, len(documents), document_batch_chunk):
                     d = documents[d_start : d_start + document_batch_chunk]
                     columns.append(maxsim_inbatch(q, d))
                 rows.append(torch.cat(columns, dim=1))
-            return torch.cat(rows, dim=0)
+            scores = torch.cat(rows, dim=0)
+            return _normalize_scores(scores, queries, normalization)
         finally:
             if previous is None:
                 os.environ.pop("COLPALI_SCORES_BACKEND", None)
@@ -73,6 +83,7 @@ def maxsim_score_matrix(
         query_batch_chunk=query_batch_chunk,
         document_batch_chunk=document_batch_chunk,
         query_token_chunk=query_token_chunk,
+        normalization=normalization,
     )
 
 
@@ -81,6 +92,7 @@ def candidate_maxsim_scores(
     documents: torch.Tensor,
     *,
     backend: MaxSimBackend = "auto",
+    normalization: MaxSimNormalization = "mean",
     query_token_chunk: int = 32,
 ) -> torch.Tensor:
     """Score per-query candidates: query[B,Lq,D], docs[B,K,Ld,D] -> [B,K]."""
@@ -93,6 +105,7 @@ def candidate_maxsim_scores(
                 queries[index : index + 1],
                 documents[index],
                 backend=backend,
+                normalization=normalization,
                 query_batch_chunk=1,
                 document_batch_chunk=1,
                 query_token_chunk=query_token_chunk,
@@ -108,6 +121,7 @@ def _chunked_torch_maxsim(
     query_batch_chunk: int,
     document_batch_chunk: int,
     query_token_chunk: int,
+    normalization: MaxSimNormalization,
 ) -> torch.Tensor:
     rows: list[torch.Tensor] = []
     for q_start in range(0, len(queries), query_batch_chunk):
@@ -122,12 +136,37 @@ def _chunked_torch_maxsim(
                 q_tokens = q_batch[
                     :, token_start : token_start + query_token_chunk
                 ]
-                raw = torch.einsum("bnd,csd->bcns", q_tokens, d_batch)
+                # Match LIK's fp32 accumulator.  Performing the dot product
+                # directly in bf16 can change close argmax winners even when
+                # the final scores look similar, which in turn changes the
+                # MaxSim backward path.
+                raw = torch.einsum(
+                    "bnd,csd->bcns",
+                    q_tokens.float(),
+                    d_batch.float(),
+                )
                 token_parts.append(raw.amax(dim=-1))
             maxima = torch.cat(token_parts, dim=-1)
             valid = q_batch[:, :, 0].ne(0).to(maxima.dtype)
             scores = (maxima * valid[:, None, :]).sum(dim=-1)
-            lengths = valid.sum(dim=-1).clamp_min(1)
-            columns.append(scores / lengths[:, None])
+            columns.append(
+                _normalize_scores(scores, q_batch, normalization)
+            )
         rows.append(torch.cat(columns, dim=1))
     return torch.cat(rows, dim=0)
+
+
+def _normalize_scores(
+    scores: torch.Tensor,
+    queries: torch.Tensor,
+    normalization: MaxSimNormalization,
+) -> torch.Tensor:
+    if normalization == "sum":
+        return scores
+    if normalization != "mean":
+        raise ValueError(
+            f"Unsupported MaxSim normalization: {normalization!r}"
+        )
+    valid = queries[:, :, 0].ne(0)
+    lengths = valid.sum(dim=-1).clamp_min(1).to(scores.dtype)
+    return scores / lengths[:, None]

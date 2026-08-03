@@ -42,6 +42,11 @@ def main() -> int:
         choices=("auto", "lik", "chunked"),
         default="auto",
     )
+    parser.add_argument(
+        "--maxsim-normalization",
+        choices=("mean", "sum"),
+        default="mean",
+    )
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -76,6 +81,7 @@ def main() -> int:
             query_tokens,
             candidates,
             backend=args.maxsim_backend,
+            normalization=args.maxsim_normalization,
         )
         ranked_ids = [item[0] for item in ranking]
         try:

@@ -1,0 +1,78 @@
+task: retrieval_late_interaction_symmetric_multi_positive
+device: cuda
+model: checkpoint
+data_root: data
+manifest_dir: data/manifests/retrieval
+hard_negatives: data/manifests/retrieval/hard_negatives.jsonl
+output_dir: outputs/retrieval_late_symmetric_fast
+
+# A micro batch contains up to 8 document-disjoint pages and four queries for
+# each page. All query rows remain in the epoch; only duplicate page forwards
+# inside the same optimizer step are shared.
+pages_per_batch: 8
+queries_per_page: 4
+micro_batch_size: 8
+page_forward_chunk_size: 8
+# The real manifest averages about 22.4 queries/grouped batch, so four
+# micro-batches preserve an effective query batch close to the old 96.
+gradient_accumulation_steps: 4
+epochs: 3
+
+# One explicit negative/query/epoch is combined with in-batch negatives and
+# the memory queue. The selected negative rotates deterministically by epoch.
+hard_negatives_per_query: 1
+rotate_hard_negatives: true
+queue_size: 256
+
+# Batch loss is a quick diagnostic. Model selection uses the same fixed first
+# 1000 validation queries after every epoch, with Recall@5 then MRR priority.
+validation_batches: 20
+retrieval_validation_queries: 1000
+retrieval_coarse_top_k: 128
+early_stopping_patience: 2
+
+lora_rank: 64
+lora_alpha: 64
+lora_dropout: 0.05
+use_rslora: true
+max_query_length: 96
+
+# Start with checkpointing enabled for a safe first run. Profile a copy with
+# false later; never change this in the middle of an exact --resume run.
+gradient_checkpointing: true
+image_only_tokens: true
+global_dim: 768
+
+# Conservative rates for initialization from retrieval_late/best.
+lora_learning_rate: 1.0e-5
+projection_learning_rate: 2.5e-5
+pooling_learning_rate: 5.0e-5
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+loss:
+  global_weight: 0.25
+  late_weight: 0.55
+  hard_negative_weight: 0.20
+  global_temperature: 0.05
+  late_temperature: 0.02
+  hard_negative_margin: 0.05
+  maxsim_backend: lik
+  maxsim_normalization: mean
+  query_batch_chunk: 1
+  document_batch_chunk: 1
+  query_token_chunk: 32
+
+num_workers: 8
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 2
+
+progress: true
+log_every: 25
+
+memory:
+  target_reserved_gb: 26.0
+  max_reserved_gb: 28.0
+  max_device_used_gb: 29.0

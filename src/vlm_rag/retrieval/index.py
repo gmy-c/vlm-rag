@@ -2,14 +2,20 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import math
 from pathlib import Path
 from typing import Any, Iterable
 
 from PIL import Image
 import torch
+from tqdm.auto import tqdm
 
 from .dataset import resolve_retrieval_path
-from .maxsim import MaxSimBackend, maxsim_score_matrix
+from .maxsim import (
+    MaxSimBackend,
+    MaxSimNormalization,
+    maxsim_score_matrix,
+)
 from .model import LateInteractionRetriever
 from .schema import RetrievalRecord
 from ..pipeline.provenance import (
@@ -57,6 +63,7 @@ def build_multivector_index(
     manifest_path: Path | None = None,
     adapter_dir: Path | None = None,
     base_model_path: Path | None = None,
+    progress: bool = False,
 ) -> dict[str, Any]:
     if batch_size < 1 or pages_per_shard < 1:
         raise ValueError("batch_size and pages_per_shard must be positive")
@@ -99,7 +106,16 @@ def build_multivector_index(
         buffered_records.clear()
         shard_number += 1
 
-    for start in range(0, len(pages), batch_size):
+    starts = range(0, len(pages), batch_size)
+    iterator = tqdm(
+        starts,
+        total=math.ceil(len(pages) / batch_size) if pages else 0,
+        desc="encoding page index",
+        unit="batch",
+        dynamic_ncols=True,
+        disable=not progress,
+    )
+    for start in iterator:
         batch = pages[start : start + batch_size]
         images: list[Image.Image] = []
         for record in batch:
@@ -116,6 +132,12 @@ def build_multivector_index(
             buffered_records.append(record)
             if len(buffered_records) >= pages_per_shard:
                 flush()
+        iterator.set_postfix(
+            pages=min(start + len(batch), len(pages)),
+            shards=shard_number,
+            refresh=False,
+        )
+    iterator.close()
     flush()
 
     metadata = {
@@ -234,6 +256,7 @@ class MultiVectorIndex:
         candidate_page_ids: list[str],
         *,
         backend: MaxSimBackend = "auto",
+        normalization: MaxSimNormalization = "mean",
         top_k: int | None = None,
     ) -> list[tuple[str, float]]:
         if query_tokens.shape[0] != 1:
@@ -264,6 +287,7 @@ class MultiVectorIndex:
             query_tokens,
             documents,
             backend=backend,
+            normalization=normalization,
             query_batch_chunk=1,
             document_batch_chunk=2,
         )[0]

@@ -42,7 +42,7 @@ export SENSITIVITY_PRED_DIR=/data/outputs/sensitivity_predictions
 export SENSITIVITY_CATALOG=$SENSITIVITY_PRED_DIR/sensitivity_catalog.jsonl
 
 export RETRIEVAL_GLOBAL_DIR=/data/outputs/retrieval_global
-export RETRIEVAL_LATE_DIR=/data/outputs/retrieval_late
+export RETRIEVAL_LATE_DIR=/data/outputs/retrieval_late_symmetric_fast
 export RETRIEVAL_TEST_INDEX_DIR=/data/outputs/retrieval_test_index
 export RETRIEVAL_INDEX_DIR=/data/outputs/retrieval_index
 export SECURE_RAG_DIR=/data/outputs/secure_rag
@@ -252,25 +252,62 @@ find "$PROFILE_ROOT" -name '*memory-profile.json' -maxdepth 1 -print
 
 ## 9. Retrieval 多向量阶段
 
+先验证本机 LIK 与 chunked 在 mean/sum 两种定义下的分数和反向梯度一致：
+
+```bash
+"$VLM_PYTHON" scripts/verify_maxsim_backends.py
+```
+
+必须输出 `"status": "passed"`；失败时不要开始正式训练。
+
+先用真实 forward/backward 测试 4/6/8/10 个页面组的显存：
+
+```bash
+"$VLM_PYTHON" scripts/profile_training_memory.py \
+  --task late-symmetric \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --work-dir "$PROJECT_ROOT/outputs/memory_profiles" \
+  --max-reserved-gb 28 \
+  --num-workers 8 \
+  --candidates 4 6 8 10
+```
+
+正式配置默认使用 8 个页面组。若 profile 中 8 超过 28GB，改用 `--pages-per-batch 6`；若 10 稳定，也不要在没有端到端吞吐对比时只因显存尚有余量就盲目增大。
+
 ```bash
 "$VLM_PYTHON" scripts/train_retrieval_late.py \
-  --config configs/retrieval_late_5090.yaml \
+  --config configs/retrieval_late_symmetric_fast_5090.yaml \
   --data-root "$DOCVQA_DATA_ROOT" \
   --model "$COLPALI_MODEL_PATH" \
   --hard-negatives "$DOCVQA_DATA_ROOT/manifests/retrieval/hard_negatives.jsonl" \
-  --init-global "$RETRIEVAL_GLOBAL_DIR/lora" \
-  --output-dir "$RETRIEVAL_LATE_DIR"
+  --init-adapter "$PROJECT_ROOT/outputs/retrieval_late/best" \
+  --output-dir "$RETRIEVAL_LATE_DIR" \
+  --pages-per-batch 8 \
+  --queries-per-page 4 \
+  --gradient-accumulation-steps 4 \
+  --epochs 3 \
+  2>&1 | tee logs/retrieval_late_symmetric_fast.log
 ```
 
-如果 LIK 不可用：
+终端会显示每个 epoch 的 batch 进度、实时 loss、平均 loss、学习率、已处理 query 和 GPU reserved 显存。详细记录位于输出目录的 `training.log` 和 `metrics.jsonl`。本配置要求 LIK；如果 LIK 不可用，先修复环境，不要在正式训练中静默切换后端。
+
+首次运行建议先用 4,096 条 query 验证：
 
 ```bash
-cp configs/retrieval_late_5090.yaml /tmp/retrieval_late.yaml
-sed -i 's/maxsim_backend: auto/maxsim_backend: chunked/' \
-  /tmp/retrieval_late.yaml
+"$VLM_PYTHON" scripts/train_retrieval_late.py \
+  --config configs/retrieval_late_symmetric_fast_5090.yaml \
+  --data-root "$DOCVQA_DATA_ROOT" \
+  --model "$COLPALI_MODEL_PATH" \
+  --hard-negatives "$DOCVQA_DATA_ROOT/manifests/retrieval/hard_negatives.jsonl" \
+  --init-adapter "$PROJECT_ROOT/outputs/retrieval_late/best" \
+  --output-dir "$PROJECT_ROOT/outputs/retrieval_late_symmetric_smoke" \
+  --pages-per-batch 4 \
+  --gradient-accumulation-steps 8 \
+  --epochs 1 \
+  --max-train-samples 4096 \
+  --max-val-samples 512
 ```
-
-随后将 `--config` 指向 `/tmp/retrieval_late.yaml`。`chunked` 仍是精确 MaxSim。
 
 ## 10. 建 test 索引、评估和生产索引
 
@@ -293,6 +330,7 @@ sed -i 's/maxsim_backend: auto/maxsim_backend: chunked/' \
   --adapter "$RETRIEVAL_LATE_DIR/best" \
   --coarse-top-k 128 \
   --maxsim-backend lik \
+  --maxsim-normalization mean \
   --output "$RETRIEVAL_LATE_DIR/test_metrics.json"
 ```
 
@@ -387,10 +425,12 @@ Retrieval late 恢复：
   --resume "$RETRIEVAL_LATE_DIR/last"
 ```
 
+新的 `last/training_state.pt` 会恢复 optimizer、scheduler、epoch、global step 和 memory queue。历史旧模型没有该文件，必须使用 `--init-adapter`，不能用 `--resume`。
+
 阶段切换不能使用 `--resume`：
 
 - Sensitivity 冻结阶段 → 解冻阶段使用 `--init-checkpoint`；
-- Retrieval global → late 使用 `--init-global`。
+- Retrieval global → 首次 late 使用 `--init-global`；已有旧 late 模型进入快速对称微调使用 `--init-adapter`。
 
 ## 13. 最终检查清单
 

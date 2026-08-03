@@ -165,9 +165,11 @@ Late 阶段不再把页面压缩成单个向量：Query 保留有效文本 token
 | late interaction | 0.55 | 学习 token 级精确匹配 |
 | hard-negative ranking | 0.20 | 拉开正确页与相似错误页 |
 
-训练还使用每 query 4 个 hard negatives、容量 256 的 detached page-token queue、rank-64 rsLoRA 和冻结视觉塔。`best/` 按 validation loss 保存，`last/` 保存最近完成的 epoch。
+5090 快速对称配置保留全部 35,153 条 query 和可训练的 query/page 编码路径，但按页面组织 batch：默认每批选择 8 个不同文档的页面，每页最多组合 4 条 query。Query→Page 使用单目标交叉熵，Page→Query 将同页的多条 query 全部视为正例；同一 batch 内的正页和 hard-negative 页按 `page_id` 只编码一次。这不是把训练集缩减为 8,937 条，而是共享同一 optimizer step 内的重复页面前向。
 
-计算量需要单独理解：当 micro-batch 为 8 时，每步最多编码 8 个问题、8 个正页面和 32 个负页面；当前实现对 4 列 hard negatives 分别调用页面编码。梯度累积只改变有效优化 batch，不会减少 micro-batch 数量。因此“只占 14 GB 显存”不代表训练很快。
+每条 query 每个 epoch 使用 1 个显式 hard negative，并按 epoch 在已有的 4 个候选间确定性轮换；in-batch negatives 和容量 256 的 detached page-token queue 仍然保留。LIK 与 chunked 均使用按有效 query token 数归一化的 mean MaxSim，避免后端切换改变训练损失尺度。
+
+训练输出包含逐 batch `tqdm` 进度条、`training.log`、逐 epoch `metrics.jsonl`、`epoch-NNN/`、`last/` 和 `best/`。`best/` 默认先保存初始化模型的 epoch-0 基线，再按固定 1,000 条 val query 的 Recall@5、MRR 选择；新 epoch 不优于基线时不会覆盖旧模型。
 
 ### Secure Generation
 
@@ -264,6 +266,12 @@ PY
 ```
 
 理想输出是 `True / lik`。若输出 `False / chunked`，计算仍是精确 MaxSim，但会明显更慢；必须先做短反向 smoke，不能假设 LIK 与当前 Python/PyTorch/CUDA 组合必然兼容。
+
+正式快速对称训练还要求 LIK 与 chunked 的归一化值及梯度一致：
+
+```bash
+python scripts/verify_maxsim_backends.py
+```
 
 ### 3. Manifest 与结构验收
 
@@ -434,14 +442,15 @@ PY
 
 ```bash
 python -u scripts/train_retrieval_late.py \
-  --config configs/retrieval_late_5090.yaml \
+  --config configs/retrieval_late_symmetric_fast_5090.yaml \
   --data-root "$DOCVQA_DATA_ROOT" \
   --model "$COLPALI_MODEL_PATH" \
   --hard-negatives "$DOCVQA_DATA_ROOT/manifests/retrieval/hard_negatives.jsonl" \
-  --init-global "$RETRIEVAL_GLOBAL_DIR/lora" \
-  --output-dir "$PROJECT_ROOT/outputs/retrieval_late_lik_smoke" \
-  --micro-batch-size 8 \
-  --gradient-accumulation-steps 12 \
+  --init-adapter "$PROJECT_ROOT/outputs/retrieval_late/best" \
+  --output-dir "$PROJECT_ROOT/outputs/retrieval_late_symmetric_smoke" \
+  --pages-per-batch 4 \
+  --queries-per-page 4 \
+  --gradient-accumulation-steps 8 \
   --epochs 1 \
   --num-workers 8 \
   --max-train-samples 256 \
@@ -451,23 +460,24 @@ python -u scripts/train_retrieval_late.py \
 确认训练/验证损失有限、反向正常且 `best/` 存在后再跑全量：
 
 ```bash
-export RETRIEVAL_LATE_DIR="$PROJECT_ROOT/outputs/retrieval_late"
+export RETRIEVAL_LATE_DIR="$PROJECT_ROOT/outputs/retrieval_late_symmetric_fast"
 
 python -u scripts/train_retrieval_late.py \
-  --config configs/retrieval_late_5090.yaml \
+  --config configs/retrieval_late_symmetric_fast_5090.yaml \
   --data-root "$DOCVQA_DATA_ROOT" \
   --model "$COLPALI_MODEL_PATH" \
   --hard-negatives "$DOCVQA_DATA_ROOT/manifests/retrieval/hard_negatives.jsonl" \
-  --init-global "$RETRIEVAL_GLOBAL_DIR/lora" \
+  --init-adapter "$PROJECT_ROOT/outputs/retrieval_late/best" \
   --output-dir "$RETRIEVAL_LATE_DIR" \
-  --micro-batch-size 8 \
-  --gradient-accumulation-steps 12 \
-  --epochs 8 \
+  --pages-per-batch 8 \
+  --queries-per-page 4 \
+  --gradient-accumulation-steps 4 \
+  --epochs 3 \
   --num-workers 8 \
   2>&1 | tee logs/retrieval_late.log
 ```
 
-`--resume` 当前只加载 language LoRA、ColPali token projection 和 query/page pooling heads，不恢复 optimizer、scheduler、epoch 编号、sampler 进度或 memory queue。因此它是“从模型权重继续训练”，不是完全无损断点续训。Global→Late 使用 `--init-global`，不能同时传入 `--resume`。
+旧 adapter 只有模型权重，使用 `--init-adapter`；新的 `last/` 同时保存 optimizer、scheduler、epoch、global step 和 memory queue，使用 `--resume` 可以严格恢复。`--epochs` 在 resume 时表示本次实验的总 epoch 上限。`--init-global`、`--init-adapter` 和 `--resume` 三者互斥。
 
 ### 7. Test 索引、检索评估与生产索引
 
@@ -491,7 +501,8 @@ python scripts/evaluate_retrieval_multivector.py \
   --model "$COLPALI_MODEL_PATH" \
   --adapter "$RETRIEVAL_LATE_DIR/best" \
   --coarse-top-k 128 \
-  --maxsim-backend auto \
+  --maxsim-backend lik \
+  --maxsim-normalization mean \
   --output "$RETRIEVAL_LATE_DIR/test_metrics.json"
 ```
 
@@ -624,11 +635,11 @@ python scripts/evaluate_secure_rag.py \
 | --- | --- |
 | 交互式 Python 报 `No module named vlm_rag` | 仓库采用 `src/` layout；使用 `PYTHONPATH=src python ...`，脚本入口已自动加入该路径 |
 | LIK 检查为 `False / chunked` | `requirements.txt` 不安装 extra；停止训练进程后安装 `colpali-engine[lik]`，再做短反向 smoke |
-| Late 一个 epoch 很慢 | 每 query 包含正页、4 个 hard negatives 和 queue MaxSim；`chunked` 的 1×1 分块会产生大量小 kernel |
+| Late 一个 epoch 很慢 | 使用 `retrieval_late_symmetric_fast_5090.yaml`；确认 LIK、页面分组、单个轮换 hard negative 和同 batch 页面去重均已生效 |
 | 显存低但训练不快 | 显存容量与吞吐不是同一指标；检查训练中 GPU Util、数据解码和 MaxSim backend |
 | Global profile 通过但正式训练 OOM | query 长度、完整反向、allocator 峰值和 profile 样本可能不同；采用稳定 batch 64/accumulation 2，并保留余量 |
 | hard negatives 少于 4 | 同文档过滤后候选不足；提高 `candidate-top-k` 并重新审计，不要静默训练空负样本 |
-| `--resume` 后 epoch/LR 重置 | Late 当前只恢复模型权重，不恢复 optimizer/scheduler/queue；这是已知实现边界 |
+| `--resume` 报缺少 `training_state.pt` | 历史 adapter 使用 `--init-adapter`；只有新版 `last/` 支持严格 `--resume` |
 | index provenance mismatch | adapter、基础模型或脚本已变化；用当前 adapter 和 manifest 重建多向量索引 |
 | dependency exact 校验失败 | 新服务器环境使用 `--dependency-policy compatible`；只有复现本地锁定环境时才使用 exact |
 | 12GB 上 Late backward OOM | 本地 12GB 只适合结构/前向和小 smoke；全量 Late 使用 32GB GPU 并先 profile |
@@ -665,8 +676,8 @@ git diff --check
 
 - Sensitivity 是页面级风险筛查，不是字段检测、OCR 规则解释器或自动涂黑系统。
 - 完整 Retrieval test、全量生产索引和真实 Doubao 评估尚未在本地归档。
-- Late 的 optimizer/scheduler 不支持严格断点恢复。
-- hard-negative 页面当前按列多次编码，吞吐仍有优化空间。
+- 新版 Late 的 `last/training_state.pt` 支持 optimizer、scheduler、epoch、global step 与 queue 严格恢复；历史旧 adapter 只能作为 `--init-adapter`。
+- 页面分组会在同一 batch 内共享正页/负页前向，但不会跨 optimizer step 缓存最终页面向量；query/page 对称训练仍然保留。
 - LIK 是否可用取决于服务器的 Python、PyTorch、CUDA 和已安装 wheel；`chunked` 正确但速度较慢。
 - Doubao 融合是逐页回答后融合，不等同于一次性多图联合推理。
 - 早期 OCR-RAG、SigLIP、单向量 ColPali 和图像拼接结果只用于研究基线。
@@ -674,11 +685,11 @@ git diff --check
 ### 后续优先级
 
 1. 安装并验证 LIK 的训练反向，记录同一数据子集的端到端加速比。
-2. 合并或分块向量化 hard-negative 页面编码，减少每步 4 次独立页面 forward。
+2. 在 5090 上分别 profile gradient checkpointing 开/关，选择 reserved 不超过 28GB 的最快配置。
 3. 将服务器 Sensitivity test、Global/Late checkpoint、日志与 retrieval test JSON 归档到可审计实验目录。
 4. 完成 test-only 多向量索引评估，再构建全量生产索引。
 5. 在严格外发门控下完成 1–10 条真实 Doubao 请求，记录费用、延迟、EM/Accuracy 和失败类型。
-6. 为 Late 增加 optimizer、scheduler、epoch、sampler 与 queue 的完整 checkpoint 恢复。
+6. 可选地评估冻结视觉前缀缓存；只有端到端 profiler 证明 SigLIP 占比足够高时再引入。
 
 ## 安全说明
 

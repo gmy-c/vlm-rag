@@ -2,11 +2,14 @@
 
 from .dataset import (
     DocumentUniqueBatchSampler,
+    PageGroupedBatchSampler,
+    PageGroupedRetrievalBatch,
     RetrievalBatch,
     RetrievalManifestDataset,
     load_hard_negative_map,
     resolve_retrieval_path,
     retrieval_collate,
+    page_grouped_retrieval_collate,
 )
 from .manifest import (
     RetrievalManifestBuildResult,
@@ -17,6 +20,7 @@ from .losses import (
     HybridLossConfig,
     MultiVectorMemoryQueue,
     hybrid_retrieval_loss,
+    multi_positive_symmetric_cross_entropy,
     symmetric_global_info_nce,
 )
 from .maxsim import (
@@ -36,6 +40,8 @@ __all__ = [
     "LateInteractionModelConfig",
     "LateInteractionRetriever",
     "MultiVectorMemoryQueue",
+    "PageGroupedBatchSampler",
+    "PageGroupedRetrievalBatch",
     "MultiVectorIndex",
     "RetrievalBatch",
     "RetrievalManifestBuildResult",
@@ -44,11 +50,13 @@ __all__ = [
     "build_retrieval_manifests",
     "build_multivector_index",
     "hybrid_retrieval_loss",
+    "multi_positive_symmetric_cross_entropy",
     "late_interaction_kernel_available",
     "load_retrieval_manifest",
     "load_hard_negative_map",
     "resolve_retrieval_path",
     "retrieval_collate",
+    "page_grouped_retrieval_collate",
     "maxsim_score_matrix",
     "symmetric_global_info_nce",
     "write_retrieval_manifest",

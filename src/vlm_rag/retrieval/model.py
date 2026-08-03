@@ -304,7 +304,7 @@ class LateInteractionRetriever(nn.Module):
             mismatches = {
                 key: (saved.get(key), current.get(key))
                 for key in current
-                if key != "checkpoint_path"
+                if key not in {"checkpoint_path", "gradient_checkpointing"}
                 and key in saved
                 and saved[key] != current[key]
             }

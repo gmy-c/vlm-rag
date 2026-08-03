@@ -30,6 +30,7 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--pages-per-shard", type=int, default=128)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--no-progress", action="store_true")
     args = parser.parse_args()
 
     if args.adapter is not None:
@@ -53,6 +54,7 @@ def main() -> int:
         manifest_path=args.manifest,
         adapter_dir=args.adapter,
         base_model_path=Path(args.model),
+        progress=not args.no_progress,
     )
     print(
         f"Indexed {metadata['page_count']} pages in {args.output_dir.resolve()}"
