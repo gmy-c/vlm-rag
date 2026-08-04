@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 
 import torch
+from tqdm.auto import tqdm
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +49,11 @@ def main() -> int:
         default="mean",
     )
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable the evaluation progress bar.",
+    )
     args = parser.parse_args()
 
     records = load_retrieval_manifest(args.manifest)
@@ -69,7 +75,16 @@ def main() -> int:
     reciprocal_ranks = []
     recall_hits = {1: 0, 5: 0, 10: 0}
     misses = []
-    for record in records:
+    progress = tqdm(
+        records,
+        total=len(records),
+        desc="evaluating retrieval",
+        unit="query",
+        dynamic_ncols=True,
+        disable=args.no_progress,
+    )
+    reciprocal_rank_sum = 0.0
+    for query_index, record in enumerate(progress, start=1):
         query_tokens, query_global = model.encode_queries(
             [record.query_text]
         )
@@ -86,7 +101,9 @@ def main() -> int:
         ranked_ids = [item[0] for item in ranking]
         try:
             rank = ranked_ids.index(record.positive_page_id) + 1
-            reciprocal_ranks.append(1.0 / rank)
+            reciprocal_rank = 1.0 / rank
+            reciprocal_ranks.append(reciprocal_rank)
+            reciprocal_rank_sum += reciprocal_rank
         except ValueError:
             rank = None
             reciprocal_ranks.append(0.0)
@@ -94,6 +111,13 @@ def main() -> int:
         for cutoff in recall_hits:
             recall_hits[cutoff] += int(
                 record.positive_page_id in ranked_ids[:cutoff]
+            )
+        if query_index == 1 or query_index % 25 == 0 or query_index == len(records):
+            progress.set_postfix(
+                mrr=f"{reciprocal_rank_sum / query_index:.4f}",
+                r5=f"{recall_hits[5] / query_index:.4f}",
+                miss=len(misses),
+                refresh=False,
             )
     count = len(records)
     if count == 0:
